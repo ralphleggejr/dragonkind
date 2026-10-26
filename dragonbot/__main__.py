@@ -8,7 +8,7 @@ from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
 REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECTOR',
-            'MFA_SELECTOR', 'AUTH_READY_SELECTOR', 'CHOICES_SELECTOR', 'DEATH_SELECTOR',
+            'MFA_SELECTOR', 'AUTH_READY_SELECTOR', 'CHOICES_SELECTOR', 'CHOICE_SUBMIT_SELECTOR', 'DEATH_SELECTOR',
             'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER']
 
 
@@ -50,6 +50,28 @@ def click_transition(page, target):
                            arg={'text': before, 'url': url}, timeout=20000)
     # Missing or ambiguous choices after a transition fail closed.
     page.wait_for_load_state('domcontentloaded')
+
+
+def execute_choice(page, selection):
+    if selection.evaluate('(element) => element.tagName') != 'LABEL':
+        click_transition(page, selection)
+        return
+    control_id = selection.get_attribute('for')
+    if not control_id:
+        raise RuntimeError('Choice label has no associated input')
+    control = page.evaluate("""(id) => {
+        const input = document.getElementById(id);
+        return input && input.tagName === 'INPUT' && input.type === 'radio' && !input.disabled;
+    }""", control_id)
+    if not control:
+        raise RuntimeError('Choice label does not identify an enabled radio input')
+    selection.click()
+    page.wait_for_function('(id) => document.getElementById(id)?.checked === true', arg=control_id)
+    # Selection alone does not advance the story; submit only after it is checked.
+    submit = visible(page, 'CHOICE_SUBMIT_SELECTOR')
+    if submit.count() != 1:
+        raise RuntimeError('Expected one visible choice submit button')
+    click_transition(page, submit)
 
 
 def complete_mfa(page, code):
@@ -116,7 +138,7 @@ def play(browser, route, state, account):
                       os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
                 return
             selection = choose(labels, options, allow_contains=index == len(route['steps']) - 1)
-            click_transition(page, visible(page, 'CHOICES_SELECTOR').nth(selection))
+            execute_choice(page, visible(page, 'CHOICES_SELECTOR').nth(selection))
         if not visible(page, 'DEATH_SELECTOR').count():
             raise RuntimeError('Route ended without a confirmed death screen')
         # Start cooldown on confirmation, even if logout subsequently fails.

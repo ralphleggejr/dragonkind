@@ -1,19 +1,83 @@
 {
-  "accounts": ["ralphleggejr@gmail.com", "ralphleggejr.apple@gmail.com", "leggetechsolutions@gmail.com", "leggefamilyco@gmail.com", "rljr.code@gmail.com", "rlegge.code@gmail.com", "leggejr.co@gmail.com", "10249Southlawncir@gmail.com"],
-  "steps": [
-    ["Brave threshing"], ["Brave threshing"], ["continue"], ["continue"],
-    ["Enter the valley alone"], ["head towards the center of the forest"],
-    ["Lower your eyes and hold still", "Lower eyes in respect"],
-    ["Head deeper into the forest"], ["Investigate scream"], ["Help your squadmate"],
-    ["pause to assess the situation even though it may risk your squadmate's life"],
-    ["Engage the smaller cadet"], ["continue"], ["Allow your squadmate to exact their own revenge"],
-    ["next scene"], ["walk farther into the forest"], ["continue"],
-    ["Find the tallest tree and climb for a better view"], ["continue"],
-    ["Descend quickly in preparation for whatever's coming your way"],
-    ["jump now and you can land on it's back"],
-    ["Hold the red's gaze. No guts, no glory and all."],
-    ["Hope for the best"]
+  "accounts": [
+    "ralphleggejr@gmail.com",
+    "ralphleggejr.apple@gmail.com",
+    "leggetechsolutions@gmail.com",
+    "leggefamilyco@gmail.com",
+    "rljr.code@gmail.com",
+    "rlegge.code@gmail.com",
+    "leggejr.co@gmail.com",
+    "10249Southlawncir@gmail.com"
   ],
-  "shadow_checkpoint": 19,
+  "steps": [
+    [
+      "Brave threshing"
+    ],
+    [
+      "Brave threshing"
+    ],
+    [
+      "continue"
+    ],
+    [
+      "continue"
+    ],
+    [
+      "Enter the valley alone"
+    ],
+    [
+      "Head toward the center of the forest"
+    ],
+    [
+      "Lower your eyes and hold still",
+      "Lower eyes in respect"
+    ],
+    [
+      "Head deeper into the forest"
+    ],
+    [
+      "Investigate the scream"
+    ],
+    [
+      "Help your squadmate"
+    ],
+    [
+      "pause to assess the situation even though it may risk your squadmate's life"
+    ],
+    [
+      "Engage the smaller cadet"
+    ],
+    [
+      "continue"
+    ],
+    [
+      "Allow your squadmate to exact their own revenge"
+    ],
+    [
+      "walk farther into the forest"
+    ],
+    [
+      "continue"
+    ],
+    [
+      "Find the tallest tree and climb for a better view"
+    ],
+    [
+      "continue"
+    ],
+    [
+      "Descend quickly in preparation for whatever's coming your way"
+    ],
+    [
+      "jump now and you can land on it's back"
+    ],
+    [
+      "Hold the red's gaze. No guts, no glory and all."
+    ],
+    [
+      "Hope for the best"
+    ]
+  ],
+  "shadow_checkpoint": 18,
   "cooldown_seconds": 14400
 }
