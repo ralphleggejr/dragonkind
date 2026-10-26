@@ -7,7 +7,7 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 - Run accounts sequentially, requesting a fresh verification code for each login. Forward the full original email, including its original From/To headers, to `rljr.code@gmail.com` **after** the console asks for that account's code. If that account receives its code directly in this inbox, no forwarding is necessary. Do not forward stripped-down code-only messages or quoted email threads containing multiple codes.
 - Only new inbox messages received after the request boundary are considered. Match the intended account, original sender, and one unique code. Inbox messages are read without marking them read or deleting them. Codes and credentials are not deliberately logged or persisted.
 - Follow `route.json`. A radio choice plus its “Next Scene” submission is one route step; Continue and Brave Threshing controls are separate steps. Text matching ignores case, spacing, curly apostrophes, and final punctuation. All choices require a unique exact match except the final “Hope for the best” phrase. Review the route against the site's real labels, especially “it's back.”
-- At the configured checkpoint, pause that account if any visible choice label mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
+- At the configured checkpoint, pause that account if any visible choice label mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context and its browser process, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
 - Follow the supplied death narrative Continue pages to the terminal retry result. Only then start that account's four-hour cooldown, open the result's Rotunda link, verify `#cooldown-label`, and click Profile → Sign out. Confirm the email login form before continuing with the next eligible account. Cooldowns and pauses survive container restarts in `data/state.json`.
 - Unexpected pages, ambiguous choices, timeouts, mail failures, or interrupted active runs pause the entire runner for review. It never solves CAPTCHAs or bypasses MFA. A failed notification leaves a persistent pending flag for retry on restart.
 
@@ -196,3 +196,20 @@ docker compose run --rm dragonbot python -m dragonbot diagnose-login --account l
 This opens the public login page, uses the same email typing and arrow-click functions as the runner, and intercepts the outgoing `/enter` POST before it reaches the server. All non-GET/HEAD requests are blocked during the diagnostic, and service workers are disabled so they cannot bypass that interception. No verification email is requested, game choices are not made, and saved pauses/cooldowns are untouched. Output includes the actual submitted `reader` email, form-field names, and booleans for cookie/CSRF/header presence. Token values, cookie values, other form values, and credentials are excluded. Compare the email and field names with a successful manual-browser submission. This does not reproduce a server response because the POST is deliberately blocked.
 
 Public-page inspection confirmed `POST /enter` with the `reader` field and a hidden `_csrf_token`. The site sends `Referrer-Policy: no-referrer`, so an absent Referer header in diagnostics is expected; the app preserves that policy. Rendering/readiness changes and a bounded fresh-form retry have not yet been verified against the live address rejection.
+
+## Record a manual walkthrough on macOS
+
+Stop the bot first. Codegen runs a visible browser and Playwright Inspector on the Mac desktop, outside the headless Docker container. Python 3 is required; install it from python.org if `python3` is unavailable.
+
+```bash
+cd "$HOME/Downloads/dragonkind-git"
+docker compose down
+git pull --ff-only
+bash scripts/record-mac.sh
+```
+
+The script prepares an ignored local `.venv`, installs the pinned Playwright version and Chromium, and starts codegen. Record the welcome screen, email entry, and arrow click. In Inspector, turn **Record off before entering MFA**, log in manually, then turn Record back on for the story, choices, death pages, Rotunda, Profile, and Sign out. If login is rejected in this visible browser too, stop and report that outcome. This is a manual live walkthrough and story choices can consume an account's available attempt.
+
+Close the recorder browser when finished. Generated Python is saved in a timestamped `data/recording-*.py` file. Review it and remove verification-code literals before sharing it. Recording files stay local: `data/` is excluded from Git and Docker builds. Do not run the generated script automatically; it needs review and the scheduler/MFA logic added around the recorded actions. Codegen records locators and actions, not a full network diagnosis.
+
+The automation now launches and closes a separate Chromium process for every account run. An HTTP 422 retry closes the old context and browser before launching its replacement. Browser shutdown runs on success, pause, and failure. The lightweight scheduler stays alive between eligible runs to enforce cooldowns; no game browser is kept open while it waits. `docker compose down` stops the scheduler/container completely. Closing the browser does not erase the server's account state or the local cooldown/pause records.

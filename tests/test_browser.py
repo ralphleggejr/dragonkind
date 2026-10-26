@@ -388,7 +388,7 @@ class BrowserFlow(unittest.TestCase):
         finally:
             context.close()
 
-    def exercise_login_retry(self, statuses):
+    def exercise_login_retry(self, statuses, replace_page=False):
         context = self.browser.new_context()
         roots, posts, csrf_values = [], [], []
         def server(route):
@@ -414,7 +414,15 @@ class BrowserFlow(unittest.TestCase):
                                         'EMAIL_SUBMIT_SELECTOR': '#send', 'EMAIL_TYPING_DELAY_MS': '0',
                                         'LOGIN_EMAIL_CASE': 'original'}):
                 try:
-                    boundary = request_login_email(page, 'leggejr.co@gmail.com', callback)
+                    def new_page_for_retry():
+                        page.close()
+                        replacement = context.new_page()
+                        replacement.set_default_timeout(2000)
+                        replacement.goto('https://dragonkind.com')
+                        prepare_login(replacement)
+                        return replacement
+                    boundary = request_login_email(page, 'leggejr.co@gmail.com', callback,
+                                                   restart_page=new_page_for_retry if replace_page else None)
                 except LoginRequestRejected as error:
                     failure = error.status
             return roots, posts, csrf_values, boundary, failure, callback.call_count
@@ -441,3 +449,12 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertEqual(len(roots), 1)
         self.assertEqual(failure, 429)
+
+    def test_login_retry_continues_on_replacement_page(self):
+        roots, posts, csrf, boundary, failure, calls = self.exercise_login_retry([422, 200], replace_page=True)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(len(roots), 2)
+        self.assertEqual(csrf, ['token-1', 'token-2'])
+        self.assertEqual(boundary, 20)
+        self.assertIsNone(failure)
+        self.assertEqual(calls, 2)

@@ -141,6 +141,46 @@ class Decisions(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_account_runs_close_browser_before_the_next_run_starts(self):
+        from dragonbot.__main__ import run_account
+        from unittest.mock import MagicMock
+        events = []
+        engine = MagicMock()
+        browsers = [MagicMock(), MagicMock()]
+        for index, browser in enumerate(browsers):
+            browser.close.side_effect = lambda i=index: events.append(f'close-{i}')
+        def launch(**kwargs):
+            index = sum(event.startswith('launch-') for event in events)
+            events.append(f'launch-{index}')
+            return browsers[index]
+        engine.chromium.launch.side_effect = launch
+        with patch('dragonbot.__main__.play', side_effect=lambda *args, **kwargs: events.append('play')):
+            run_account(engine, {}, {}, 'one@gmail.com')
+            run_account(engine, {}, {}, 'two@gmail.com')
+        self.assertEqual(events, ['launch-0', 'play', 'close-0', 'launch-1', 'play', 'close-1'])
+
+    def test_retry_browser_is_closed_before_replacement_and_closed_on_failure(self):
+        from dragonbot.__main__ import run_account
+        from unittest.mock import MagicMock
+        events = []
+        engine = MagicMock()
+        first, second = MagicMock(), MagicMock()
+        first.close.side_effect = lambda: events.append('close-first')
+        second.close.side_effect = lambda: events.append('close-second')
+        def launch(**kwargs):
+            if not events:
+                events.append('launch-first')
+                return first
+            events.append('launch-second')
+            return second
+        engine.chromium.launch.side_effect = launch
+        def failing_run(*args, restart_browser):
+            self.assertIs(restart_browser(), second)
+            raise RuntimeError('fixture failure')
+        with patch('dragonbot.__main__.play', side_effect=failing_run), self.assertRaises(RuntimeError):
+            run_account(engine, {}, {}, 'one@gmail.com')
+        self.assertEqual(events, ['launch-first', 'close-first', 'launch-second', 'close-second'])
+
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())
         self.assertEqual(len(set(route['accounts'])), 8)

@@ -133,7 +133,7 @@ def submit_login_code_request(page):
         button.click()
 
 
-def request_login_email(page, account, before_request=None):
+def request_login_email(page, account, before_request=None, restart_page=None):
     for attempt in range(2):
         submitted = fill_login_email(page, account)
         boundary = before_request() if before_request else None
@@ -144,9 +144,13 @@ def request_login_email(page, account, before_request=None):
         except LoginRequestRejected as error:
             if error.status != 422 or attempt == 1:
                 raise
-            print('Login rejected with HTTP 422; reloading the login form for one retry.', flush=True)
-            page.goto('https://dragonkind.com', wait_until='domcontentloaded')
-            prepare_login(page)
+            if restart_page:
+                print('Login rejected with HTTP 422; closing the browser before one fresh retry.', flush=True)
+                page = restart_page()
+            else:
+                print('Login rejected with HTTP 422; reloading the login form for one retry.', flush=True)
+                page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+                prepare_login(page)
 
 
 def click_transition(page, target):
@@ -257,13 +261,23 @@ def alert(state, account, reason, page=None, global_pause=True):
         print('Notification could not be delivered. Pause saved; check mail settings.', flush=True)
 
 
-def play(browser, route, state, account):
+def play(browser, route, state, account, restart_browser=None):
     record = state['accounts'].setdefault(account, {})
     context = browser.new_context()
     page = context.new_page()
     configure_page(page)
     authenticated = False
     phase = 'loading the page'
+    def restart_login_page():
+        nonlocal context, page
+        context.close()
+        fresh_browser = restart_browser()
+        context = fresh_browser.new_context()
+        page = context.new_page()
+        configure_page(page)
+        page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+        prepare_login(page)
+        return page
     try:
         record.update(status='active', step=0)
         save_state(STATE, state)
@@ -276,7 +290,8 @@ def play(browser, route, state, account):
         phase = 'connecting to Gmail inbox'
         with inbox() as client:
             phase = 'submitting the login email'
-            boundary = request_login_email(page, account, before_request=lambda: highwater(client))
+            boundary = request_login_email(page, account, before_request=lambda: highwater(client),
+                                           restart_page=restart_login_page if restart_browser else None)
             phase = 'waiting for the code-entry field'
             print('Send-code button clicked; waiting for the code-entry field.', flush=True)
             page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
@@ -320,6 +335,24 @@ def play(browser, route, state, account):
         context.close()
 
 
+def run_account(playwright, route, state, account):
+    browser = None
+    def launch_fresh_browser():
+        nonlocal browser
+        if browser is not None:
+            browser.close()
+            browser = None
+            print('Previous browser fully closed.', flush=True)
+        browser = playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
+        return browser
+    try:
+        play(launch_fresh_browser(), route, state, account, restart_browser=launch_fresh_browser)
+    finally:
+        if browser is not None:
+            browser.close()
+            print(f'Browser fully closed for {account}.', flush=True)
+
+
 def run():
     from playwright.sync_api import sync_playwright
     route = configuration()
@@ -342,23 +375,19 @@ def run():
         print('Global pause is active. Review data/state.json and the saved screenshot.')
         return
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
-        try:
-            while not state['global_pause']:
-                for account in route['accounts']:
-                    record = state['accounts'].get(account, {})
-                    if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
-                        continue
-                    play(browser, route, state, account)
-                    if state['global_pause']:
-                        break
-                if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
-                    print('All configured accounts are paused; review saved state.', flush=True)
+        while not state['global_pause']:
+            for account in route['accounts']:
+                record = state['accounts'].get(account, {})
+                if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
+                    continue
+                run_account(playwright, route, state, account)
+                if state['global_pause']:
                     break
-                if not state['global_pause']:
-                    time.sleep(15)
-        finally:
-            browser.close()
+            if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
+                print('All configured accounts are paused; review saved state.', flush=True)
+                break
+            if not state['global_pause']:
+                time.sleep(15)
 
 
 def inspect_login_submission(page, account):
