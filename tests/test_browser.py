@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -28,17 +28,18 @@ class BrowserFlow(unittest.TestCase):
         cls.browser.close()
         cls.driver.stop()
 
-    def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False):
+    def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2):
         rows = [[options[0], 'Other choice'] for options in ROUTE['steps']]
         if mismatch:
             rows[0] = ['Unrecognized choice']
         if shadow:
-            rows[ROUTE['shadow_checkpoint']].append('Follow the shadow')
+            rows[ROUTE['shadow_checkpoint']].insert(shadow_position, 'Follow the shadow')
         html = '''<html><body><script>
-        const rows = ROWS; const forms = FORMS; let n = -2;
+        const rows = ROWS; const forms = FORMS; const logoutFlow = LOGOUT_FLOW; let n = -2;
         function draw() {
           document.body.innerHTML = n === -2 ? '<input type="email"><button id="email" onclick="next()">Request</button>'
             : n === -1 ? '<input id="mfa"><button id="submit" onclick="next()">Verify</button>'
+            : logoutFlow && n >= rows.length ? deathFlow()
             : n >= rows.length ? '<h1 id="death">Dead</h1><button id="logout" onclick="n=-3;next()">Sign out</button>'
             : '<h1>Scene '+n+'</h1>'+(forms && n > 1 && rows[n][0].toLowerCase() !== 'continue'
               ? `<form id="choices" onsubmit="event.preventDefault();if(this.querySelector(':checked'))next()">`+
@@ -51,8 +52,13 @@ class BrowserFlow(unittest.TestCase):
                 : rows[n].map(t=>'<button class="choice" onclick="next()">'+t+'</button>').join(''))+
                 (forms ? '<button hidden data-page-next type="button">Continue</button>' : '');
         }
+        function deathFlow() {
+          if(n === rows.length) return '<h1 id="death">Dead</h1><button class="onward" data-page-next data-step="3" onclick="next()">Continue</button>';
+          if(n === rows.length+1) return '<a class="icon-button" href="/rotunda" onclick="event.preventDefault();next()"><span>Rotunda</span></a>';
+          return `<button class="icon-button" popovertarget="profile" type="button"><span>Profile</span></button><div id="profile" popover><button class="text-link" type="submit" onclick="n=-3;next()">Sign out</button></div>`;
+        }
         function next() { n++; draw(); } draw();
-        </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('FORMS', json.dumps(forms))
+        </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('FORMS', json.dumps(forms)).replace('LOGOUT_FLOW', json.dumps(logout_flow))
         if auto_submit:
             html = html.replace('<input id="mfa">', '<input id="mfa" oninput="if(this.value.length===6)next()">')
         context = self.browser.new_context()
@@ -65,6 +71,12 @@ class BrowserFlow(unittest.TestCase):
                     'MFA_AUTO_SUBMIT': 'true' if auto_submit else 'false', 'AUTH_READY_SELECTOR': 'a.button[href="/archway"]' if forms else '.choice >> nth=0',
                     'CHOICES_SELECTOR': ('a.button[href="/archway"], button.button[type="submit"]:has-text("Brave Threshing"), button[data-page-next], label[for^="choice-"]' if forms else '.choice'), 'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form=choices]', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
+        settings.update(DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='')
+        if logout_flow:
+            settings.update(DEATH_CONTINUE_SELECTOR='button.onward[data-page-next]',
+                            ROTUNDA_SELECTOR='a.icon-button[href="/rotunda"]',
+                            PROFILE_SELECTOR='button[popovertarget="profile"]',
+                            SIGN_OUT_SELECTOR='button.text-link[type="submit"]:text-is("Sign out")')
         previous = Path.cwd()
         with tempfile.TemporaryDirectory() as directory:
             try:
@@ -167,5 +179,26 @@ class BrowserFlow(unittest.TestCase):
             page.set_content('<label for="choice-1">Enter the valley alone</label><button data-choices-submit form="choices">Next Scene</button>')
             with self.assertRaises(RuntimeError):
                 execute_choice(page, page.locator('label'))
+        finally:
+            context.close()
+
+    def test_death_continue_rotunda_profile_and_signout(self):
+        state, emails = self.exercise(auto_submit=True, forms=True, logout_flow=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(emails, 0)
+
+    def test_shadow_in_first_label_also_pauses(self):
+        state, _ = self.exercise(auto_submit=True, forms=True, shadow=True, shadow_position=0)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
+        self.assertFalse(state['global_pause'])
+
+    def test_ordinary_continue_is_not_proof_of_death(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content('<button data-page-next onclick="document.body.innerHTML=\"WRONG\"">Continue</button>')
+            with patch.dict(os.environ, {'DEATH_SELECTOR': '#death'}), self.assertRaises(RuntimeError):
+                logout_after_death(page)
+            self.assertEqual(page.locator('body').inner_text(), 'Continue')
         finally:
             context.close()

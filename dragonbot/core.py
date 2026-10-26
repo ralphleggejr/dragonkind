@@ -21,7 +21,7 @@ def choose(labels, alternatives, allow_contains=False):
 
 
 def shadow(labels):
-    return len(labels) >= 3 and 'shadow' in normalized(labels[2])
+    return any('shadow' in normalized(label) for label in labels)
 
 
 def save_state(path, state):

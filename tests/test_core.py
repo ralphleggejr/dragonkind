@@ -21,9 +21,11 @@ class Decisions(unittest.TestCase):
         self.assertEqual(choose(['Jump now and you can land on it’s back.'],
                                 ["jump now and you can land on it's back"]), 0)
 
-    def test_shadow_only_third_choice(self):
+    def test_shadow_in_any_option(self):
         self.assertTrue(shadow(['a', 'b', 'A shadow moves']))
-        self.assertFalse(shadow(['shadow', 'b', 'c']))
+        self.assertTrue(shadow(['shadow', 'b', 'c']))
+        self.assertTrue(shadow(['a', 'A SHADOW moves']))
+        self.assertFalse(shadow([]))
         self.assertFalse(shadow(['a', 'b']))
 
     def test_hope_requires_unique_match(self):

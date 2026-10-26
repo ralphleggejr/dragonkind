@@ -86,6 +86,21 @@ def complete_mfa(page, code):
     field.wait_for(state='hidden')
 
 
+def logout_after_death(page):
+    # This function must never use the ordinary Continue button as proof of death.
+    if not visible(page, 'DEATH_SELECTOR').count():
+        raise RuntimeError('Logout sequence requires a confirmed death screen')
+    for name in ('DEATH_CONTINUE_SELECTOR', 'ROTUNDA_SELECTOR'):
+        if os.environ.get(name):
+            click_transition(page, visible(page, name))
+    if os.environ.get('PROFILE_SELECTOR'):
+        visible(page, 'PROFILE_SELECTOR').click()
+    sign_out = page.locator(os.environ['SIGN_OUT_SELECTOR']).filter(visible=True)
+    sign_out.wait_for(state='visible')
+    sign_out.click()
+    prepare_login(page)
+
+
 def alert(state, account, reason, page=None, global_pause=True):
     record = state['accounts'].setdefault(account, {})
     record.update(status='paused', reason=reason, notification_pending=True)
@@ -134,7 +149,7 @@ def play(browser, route, state, account):
                 break
             labels = visible(page, 'CHOICES_SELECTOR').all_inner_texts()
             if index == route['shadow_checkpoint'] and shadow(labels):
-                alert(state, account, 'Third option mentions shadow', page,
+                alert(state, account, 'A story option mentions shadow', page,
                       os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
                 return
             selection = choose(labels, options, allow_contains=index == len(route['steps']) - 1)
@@ -144,8 +159,7 @@ def play(browser, route, state, account):
         # Start cooldown on confirmation, even if logout subsequently fails.
         record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')
         save_state(STATE, state)
-        click_transition(page, visible(page, 'SIGN_OUT_SELECTOR'))
-        prepare_login(page)
+        logout_after_death(page)
         record.update(status='cooldown', step=0)
         save_state(STATE, state)
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)

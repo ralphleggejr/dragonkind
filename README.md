@@ -7,8 +7,8 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 - Run accounts sequentially, requesting a fresh verification code for each login. Forward the full original email, including its original From/To headers, to `rljr.code@gmail.com` **after** the console asks for that account's code. If that account receives its code directly in this inbox, no forwarding is necessary. Do not forward stripped-down code-only messages or quoted email threads containing multiple codes.
 - Only new inbox messages received after the request boundary are considered. Match the intended account, original sender, and one unique code. Inbox messages are read without marking them read or deleting them. Codes and credentials are not deliberately logged or persisted.
 - Follow `route.json`. A radio choice plus its “Next Scene” submission is one route step; Continue and Brave Threshing controls are separate steps. Text matching ignores case, spacing, curly apostrophes, and final punctuation. All choices require a unique exact match except the final “Hope for the best” phrase. Review the route against the site's real labels, especially “it's back.”
-- At the configured checkpoint, pause that account if the third visible choice mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
-- After a confirmed death, set that account's four-hour cooldown, sign out, verify the email login form, and continue the next eligible account. Cooldowns and pauses survive container restarts in `data/state.json`.
+- At the configured checkpoint, pause that account if any visible choice label mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
+- After a confirmed death, set that account's four-hour cooldown, click Continue → Rotunda → Profile → Sign out, and verify the email login form, and continue the next eligible account. Cooldowns and pauses survive container restarts in `data/state.json`.
 - Unexpected pages, ambiguous choices, timeouts, mail failures, or interrupted active runs pause the entire runner for review. It never solves CAPTCHAs or bypasses MFA. A failed notification leaves a persistent pending flag for retry on restart.
 
 ## Before you start
@@ -79,10 +79,13 @@ Required live-site configuration:
 | `CHOICES_SELECTOR` | Supplied Brave Threshing links/buttons, `button[data-page-next]`, and `label[for^="choice-"]`, in document order; hidden controls are excluded |
 | `CHOICE_SUBMIT_SELECTOR` | `button[data-choices-submit][form="choices"]`; used only after selecting a labeled radio option |
 | `DEATH_SELECTOR` | Element unique to the confirmed death screen |
-| `SIGN_OUT_SELECTOR` | Logout control available on that death screen |
+| `DEATH_CONTINUE_SELECTOR` | After confirmed death only: `button.onward[data-page-next]` |
+| `ROTUNDA_SELECTOR` | `a.icon-button[href="/rotunda"]` after the death Continue |
+| `PROFILE_SELECTOR` | `button[popovertarget="profile"]` opens the profile popover |
+| `SIGN_OUT_SELECTOR` | `button.text-link[type="submit"]:text-is("Sign out")` in the visible profile popover |
 | `MFA_ORIGINAL_SENDER` | Confirmed sender: `hello@dragonkind.com` |
 
-`MFA_SELECTOR` is confirmed as `#next-code`. Code entry automatically advances to the page containing “Brave Threshing.” Set `MFA_AUTO_SUBMIT=true` and `AUTH_READY_SELECTOR=a.button[href="/archway"]`; leave `MFA_SUBMIT_SELECTOR` blank. Selectors for the supplied story controls are now included in `.env.example`. Each labeled option is selected and its linked radio input verified before clicking “Next Scene.” The death screen, logout, and later story options still need live verification. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
+`MFA_SELECTOR` is confirmed as `#next-code`. Code entry automatically advances to the page containing “Brave Threshing.” Set `MFA_AUTO_SUBMIT=true` and `AUTH_READY_SELECTOR=a.button[href="/archway"]`; leave `MFA_SUBMIT_SELECTOR` blank. Selectors for the supplied story controls are now included in `.env.example`. Each labeled option is selected and its linked radio input verified before clicking “Next Scene.” The post-death controls supplied by the user are now included: Continue, Rotunda, Profile, Sign out. A unique death-screen selector and later story label wording still need verification. Continue alone does not establish death. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
 
 Selectors accept Playwright syntax, including CSS and `text=...`. Inspect the actual site in browser developer tools. Do not invent selectors or use a broad `button` selector. A password step, iframe, custom code widget, differently structured story branches, or a logout confirmation may require adapting this prototype after live inspection.
 
