@@ -1,10 +1,12 @@
 import json
+import os
 import tempfile
 import unittest
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary
+from unittest.mock import patch
+from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary, refresh_global_pause
 
 
 class Decisions(unittest.TestCase):
@@ -92,6 +94,52 @@ class Decisions(unittest.TestCase):
         self.assertTrue(result['csrf_field_nonempty'])
         self.assertTrue(result['cookie_header_present'])
         self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_inactive_account_pause_does_not_block_selected_new_account(self):
+        state = {'accounts': {
+            'old@gmail.com': {'status': 'paused', 'reason': 'HTTP 422', 'next_run': 0},
+            'new@gmail.com': {'next_run': 0}}, 'global_pause': True}
+        refresh_global_pause(state, ['new@gmail.com'])
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(state['accounts']['old@gmail.com']['status'], 'paused')
+        self.assertEqual(state['accounts']['old@gmail.com']['reason'], 'HTTP 422')
+        refresh_global_pause(state, ['old@gmail.com'])
+        self.assertTrue(state['global_pause'])
+
+    def test_account_only_shadow_pause_stays_account_only(self):
+        state = {'accounts': {'shadow@gmail.com': {'status': 'paused'},
+                              'new@gmail.com': {'next_run': 9000}}, 'global_pause': False}
+        refresh_global_pause(state, ['shadow@gmail.com', 'new@gmail.com'])
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(state['accounts']['shadow@gmail.com']['pause_scope'], 'account')
+        self.assertEqual(state['accounts']['new@gmail.com']['next_run'], 9000)
+
+    def test_another_configured_global_pause_still_blocks(self):
+        state = {'accounts': {'old@gmail.com': {'status': 'paused', 'pause_scope': 'global'},
+                              'new@gmail.com': {'next_run': 0}}, 'global_pause': True}
+        refresh_global_pause(state, ['old@gmail.com', 'new@gmail.com'])
+        self.assertTrue(state['global_pause'])
+
+    def test_reset_selected_account_ignores_inactive_pause_and_retains_cooldown(self):
+        from dragonbot.__main__ import main
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                Path('route.json').write_text(json.dumps({'accounts': ['new@gmail.com']}))
+                state_path = Path(directory) / 'state.json'
+                state = {'accounts': {'old@gmail.com': {'status': 'paused', 'reason': 'HTTP 422'},
+                                      'new@gmail.com': {'next_run': 9000}}, 'global_pause': True}
+                save_state(state_path, state)
+                with patch('dragonbot.__main__.STATE', state_path), \
+                     patch('sys.argv', ['dragonbot', 'reset', '--account', 'new@gmail.com', '--confirm-site-reset']):
+                    main()
+                result = load_state(state_path)
+                self.assertFalse(result['global_pause'])
+                self.assertEqual(result['accounts']['old@gmail.com']['status'], 'paused')
+                self.assertEqual(result['accounts']['new@gmail.com']['next_run'], 9000)
+            finally:
+                os.chdir(previous)
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())

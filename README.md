@@ -152,7 +152,7 @@ Stop the service on the old computer with `docker compose down`. Copy the projec
 
 ## Review a pause
 
-Read `data/state.json`, the notification, and the account's `data/*-paused.png`. Screenshots can contain account or story details; keep this folder private. Email updates contain the account, reason, and route step, but no screenshot or login code.
+Read `data/state.json`, the notification, and the account's `data/*-paused.png`. Paused screenshots finish CSS animations so a rejection message is not captured as an empty frame. Screenshots can contain account or story details; keep this folder private. Email updates contain the account, reason, and route step, but no screenshot or login code.
 
 No automatic resume from the middle of a story is implemented. Resolve the event manually and reset the site's run to the initial route state first. Stop the service with `docker compose down`, then explicitly clear the selected account's pause:
 
@@ -161,7 +161,7 @@ docker compose run --rm dragonbot python -m dragonbot reset --account rljr.code@
 docker compose up
 ```
 
-This keeps any existing cooldown. Other paused accounts keep a global pause until reviewed and reset as well. Do not reset merely to retry an unexplained page mismatch. Check pending mail notifications before resetting.
+This keeps any existing cooldown. Other configured accounts with a global-scope pause keep the runner paused until reviewed and reset. Accounts removed from the active `route.json` list retain their records and cooldowns but do not block the selected accounts. Account-only shadow pauses stay account-only. Re-adding an account with an unresolved global pause blocks the runner again. Do not reset merely to retry an unexplained page mismatch. Check pending mail notifications before resetting.
 
 ## Development checks (optional)
 

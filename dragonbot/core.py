@@ -83,3 +83,16 @@ def login_request_summary(body, headers, expected_account):
         'origin_header_present': bool(headers.get('origin')),
         'referer_header_present': bool(headers.get('referer')),
     }
+
+
+def refresh_global_pause(state, configured_accounts):
+    # Migrate older records once, retaining their original pause scope.
+    legacy_scope = 'global' if state.get('global_pause') else 'account'
+    for record in state['accounts'].values():
+        if record.get('status') == 'paused' and 'pause_scope' not in record:
+            record['pause_scope'] = legacy_scope
+    state['global_pause'] = any(
+        state['accounts'].get(account, {}).get('status') == 'paused'
+        and state['accounts'][account].get('pause_scope') == 'global'
+        for account in configured_accounts
+    )

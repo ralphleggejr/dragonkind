@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-from .core import choose, load_state, save_state, shadow, login_request_summary
+from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause
 from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
@@ -238,12 +238,13 @@ def logout_after_death(page):
 
 def alert(state, account, reason, page=None, global_pause=True):
     record = state['accounts'].setdefault(account, {})
-    record.update(status='paused', reason=reason, notification_pending=True)
+    record.update(status='paused', reason=reason, notification_pending=True,
+                  pause_scope='global' if global_pause else 'account')
     state['global_pause'] = state['global_pause'] or global_pause
     save_state(STATE, state)  # Persist the pause even if screenshot or mail fails.
     if page is not None:
         try:
-            page.screenshot(path=f'data/{account}-paused.png', full_page=True)
+            page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
         except Exception:
             pass
     try:
@@ -323,12 +324,20 @@ def run():
     from playwright.sync_api import sync_playwright
     route = configuration()
     state = load_state(STATE)
+    active_accounts = route['accounts']
+    refresh_global_pause(state, active_accounts)
+    save_state(STATE, state)
+    print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
     for account, record in state['accounts'].items():
+        if account not in active_accounts:
+            continue
         if record.get('status') in ('active', 'logging_out'):
             alert(state, account, 'Interrupted run; manual review required')
     for account, record in state['accounts'].items():
+        if account not in active_accounts:
+            continue
         if record.get('notification_pending'):
-            alert(state, account, record.get('reason', 'Paused'), global_pause=state['global_pause'])
+            alert(state, account, record.get('reason', 'Paused'), global_pause=record.get('pause_scope', 'global') == 'global')
     if state['global_pause']:
         print('Global pause is active. Review data/state.json and the saved screenshot.')
         return
@@ -344,6 +353,7 @@ def run():
                     if state['global_pause']:
                         break
                 if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
+                    print('All configured accounts are paused; review saved state.', flush=True)
                     break
                 if not state['global_pause']:
                     time.sleep(15)
@@ -412,9 +422,10 @@ def main():
         if args.account not in route['accounts'] or not args.confirm_site_reset:
             parser.error('reset requires a configured --account and --confirm-site-reset')
         state = load_state(STATE)
+        refresh_global_pause(state, route['accounts'])
         old = state['accounts'].get(args.account, {})
         state['accounts'][args.account] = {'next_run': old.get('next_run', 0)}
-        state['global_pause'] = any(r.get('status') == 'paused' for r in state['accounts'].values())
+        refresh_global_pause(state, route['accounts'])
         save_state(STATE, state)
     else:
         run()
