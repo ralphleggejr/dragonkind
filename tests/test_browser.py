@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play
+from dragonbot.__main__ import play, prepare_login
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -92,3 +92,27 @@ class BrowserFlow(unittest.TestCase):
         self.assertTrue(state['global_pause'])
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
         self.assertEqual(emails, 1)
+
+    def test_welcome_reveals_real_text_email_field(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content("""<button data-reveal-trigger data-step="4" onclick="document.getElementById('next-reader').hidden=false;this.hidden=true">Welcome, Candidate</button><input id="next-reader" type="text" hidden>""")
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#next-reader',
+                                        'LOGIN_ENTRY_SELECTOR': 'button[data-reveal-trigger][data-step="4"]'}):
+                prepare_login(page)
+                page.locator('#next-reader').fill('one@gmail.com')
+                self.assertEqual(page.locator('#next-reader').input_value(), 'one@gmail.com')
+        finally:
+            context.close()
+
+    def test_visible_email_skips_welcome_button(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content('<input id="next-reader" type="text">')
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#next-reader',
+                                        'LOGIN_ENTRY_SELECTOR': 'button[data-reveal-trigger][data-step="4"]'}):
+                prepare_login(page)
+        finally:
+            context.close()

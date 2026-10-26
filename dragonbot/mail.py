@@ -7,7 +7,7 @@ import time
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from .core import extract_code
+from .core import DEFAULT_CODE_REGEX, extract_code
 
 
 def inbox():
@@ -25,7 +25,7 @@ def highwater(client):
 
 
 def wait_code(client, after, account):
-    pattern = os.environ.get('MFA_CODE_REGEX', r'\b([0-9]{6})\b')
+    pattern = os.environ.get('MFA_CODE_REGEX') or DEFAULT_CODE_REGEX
     if re.compile(pattern).groups != 1:
         raise RuntimeError('MFA_CODE_REGEX must contain exactly one capture group')
     deadline = time.monotonic() + int(os.environ.get('MFA_TIMEOUT_SECONDS', '600'))

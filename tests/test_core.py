@@ -4,7 +4,7 @@ import unittest
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from dragonbot.core import choose, extract_code, load_state, save_state, shadow
+from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow
 
 
 class Decisions(unittest.TestCase):
@@ -59,6 +59,18 @@ class Decisions(unittest.TestCase):
     def test_ambiguous_code_is_rejected(self):
         msg = self.message('From: login@dragonkind.com\nTo: one@gmail.com\nCodes: 123456 and 654321')
         self.assertIsNone(extract_code(msg, 'one@gmail.com', 'login@dragonkind.com', r'\b([0-9]{6})\b'))
+
+    def test_real_email_wording_and_alphanumeric_format(self):
+        for code in ('A1B-2C3', 'ABC123', '123456'):
+            with self.subTest(code=code):
+                msg = self.message('From: Dragonkind <hello@dragonkind.com>\nTo: one@gmail.com\nYour confirmation code is ' + code + '.')
+                self.assertEqual(extract_code(msg, 'one@gmail.com', 'hello@dragonkind.com', DEFAULT_CODE_REGEX), code)
+
+    def test_default_pattern_rejects_words_and_invalid_lengths(self):
+        for body in ('Please confirm your account.', 'Your confirmation code is ABC1234.',
+                     'Your confirmation code is AB-1234.', 'Your confirmation code is ABC-123-X.'):
+            msg = self.message('From: hello@dragonkind.com\nTo: one@gmail.com\n' + body)
+            self.assertIsNone(extract_code(msg, 'one@gmail.com', 'hello@dragonkind.com', DEFAULT_CODE_REGEX))
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())

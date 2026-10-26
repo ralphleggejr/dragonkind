@@ -26,6 +26,17 @@ def visible(page, name):
     return page.locator(os.environ[name]).filter(visible=True)
 
 
+def prepare_login(page):
+    email = page.locator(os.environ['EMAIL_SELECTOR'])
+    entry_selector = os.environ.get('LOGIN_ENTRY_SELECTOR')
+    if entry_selector:
+        entry = page.locator(entry_selector)
+        email.or_(entry).filter(visible=True).first.wait_for(state='visible')
+        if not email.is_visible():
+            entry.click()
+    email.wait_for(state='visible')
+
+
 def click_transition(page, target):
     before = page.locator('body').inner_text()
     url = page.url
@@ -66,6 +77,7 @@ def play(browser, route, state, account):
         record.update(status='active', step=0)
         save_state(STATE, state)
         page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+        prepare_login(page)
         page.locator(os.environ['EMAIL_SELECTOR']).fill(account)
         # Establish the UID boundary before requesting a new code. Old messages are ignored.
         with inbox() as client:
@@ -95,7 +107,7 @@ def play(browser, route, state, account):
         record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')
         save_state(STATE, state)
         click_transition(page, visible(page, 'SIGN_OUT_SELECTOR'))
-        page.locator(os.environ['EMAIL_SELECTOR']).wait_for(state='visible')
+        prepare_login(page)
         record.update(status='cooldown', step=0)
         save_state(STATE, state)
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)

@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 
 
+DEFAULT_CODE_REGEX = r"(?i:your confirmation code is)\s+([0-9A-Za-z]{3}-?[0-9A-Za-z]{3})(?![0-9A-Za-z-])"
+
 def normalized(text):
     return ' '.join(text.lower().replace('’', "'").split()).rstrip('.!?')
 

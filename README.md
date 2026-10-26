@@ -69,17 +69,20 @@ Required live-site configuration:
 
 | Variable | Meaning |
 | --- | --- |
-| `EMAIL_SELECTOR` | Email login field |
-| `EMAIL_SUBMIT_SELECTOR` | Button that requests a login code |
+| `LOGIN_ENTRY_SELECTOR` | Optional welcome button that reveals the login form; supplied HTML uses `button[data-reveal-trigger][data-step="4"]` |
+| `EMAIL_SELECTOR` | Email login field; supplied HTML uses `#next-reader` (a text input, not type=email) |
+| `EMAIL_SUBMIT_SELECTOR` | Supplied HTML uses `button[aria-label="Send me a code"][type="submit"]` |
 | `MFA_SELECTOR`, `MFA_SUBMIT_SELECTOR` | Code field and confirmation button |
 | `CHOICES_SELECTOR` | Only story choices, in their displayed order; exclude menus/navigation |
 | `DEATH_SELECTOR` | Element unique to the confirmed death screen |
 | `SIGN_OUT_SELECTOR` | Logout control available on that death screen |
-| `MFA_ORIGINAL_SENDER` | Exact genuine sender address from an actual verification email |
+| `MFA_ORIGINAL_SENDER` | Confirmed sender: `hello@dragonkind.com` |
+
+`MFA_SELECTOR` is confirmed as `#next-code`. The MFA submit button, story choices, death screen, and logout selectors are still unverified and must be supplied. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
 
 Selectors accept Playwright syntax, including CSS and `text=...`. Inspect the actual site in browser developer tools. Do not invent selectors or use a broad `button` selector. A password step, iframe, custom code widget, differently structured story branches, or a logout confirmation may require adapting this prototype after live inspection.
 
-The code regex defaults to a six-digit code; set it to the actual format if different. Forwarded plain-text Gmail messages are supported; HTML-only forwards are rejected. Start with one account in `route.json` while validating the flow, then restore the other accounts. Use separate folders and no concurrent runners for the same state volume.
+The default code regex matches the supplied “Your confirmation code is …” wording and accepts six letters/digits with an optional middle hyphen (for example, `A1B-2C3`). It avoids treating ordinary six-letter words in the email as codes. Forwarded plain-text Gmail messages are supported; HTML-only forwards are rejected. Start with one account in `route.json` while validating the flow, then restore the other accounts. Use separate folders and no concurrent runners for the same state volume.
 
 ## Build and run (both systems)
 
