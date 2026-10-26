@@ -28,8 +28,19 @@ def configure_page(page):
     page.set_default_navigation_timeout(timeout)
 
 
+def email_typing_delay_ms():
+    try:
+        delay = int(os.environ.get('EMAIL_TYPING_DELAY_MS', '100'))
+    except ValueError:
+        raise RuntimeError('EMAIL_TYPING_DELAY_MS must be between 0 and 1000') from None
+    if not 0 <= delay <= 1000:
+        raise RuntimeError('EMAIL_TYPING_DELAY_MS must be between 0 and 1000')
+    return delay
+
+
 def configuration():
     page_timeout_ms()
+    email_typing_delay_ms()
     if os.environ.get('LOGIN_EMAIL_CASE', 'upper') not in ('upper', 'original'):
         raise RuntimeError('LOGIN_EMAIL_CASE must be upper or original')
     missing = [name for name in REQUIRED if not os.environ.get(name)]
@@ -66,7 +77,9 @@ def prepare_login(page):
 def fill_login_email(page, account):
     submitted = account.upper() if os.environ.get('LOGIN_EMAIL_CASE', 'upper') == 'upper' else account
     field = page.locator(os.environ['EMAIL_SELECTOR'])
-    field.fill(submitted)
+    print('Entering login email with paced keystrokes.', flush=True)
+    field.fill('')
+    field.press_sequentially(submitted, delay=email_typing_delay_ms())
     field.press('Tab')  # Commit input/change/blur before submitting the form.
     if field.input_value() != submitted:
         raise RuntimeError('Email field does not contain the configured account')
@@ -80,7 +93,10 @@ class LoginRequestRejected(RuntimeError):
 def submit_login_code_request(page):
     field = page.locator(os.environ['EMAIL_SELECTOR'])
     native_post = field.evaluate('(e) => e.form?.method.toLowerCase() === "post"')
-    button = page.locator(os.environ['EMAIL_SUBMIT_SELECTOR'])
+    button = page.locator(os.environ['EMAIL_SUBMIT_SELECTOR']).filter(visible=True)
+    # Check actionability before the single actual arrow click; trial does not submit.
+    button.click(trial=True)
+    print('Email entered; clicking the Send me a code arrow.', flush=True)
     if native_post:
         with page.expect_navigation(wait_until='domcontentloaded') as navigation:
             button.click(no_wait_after=True)

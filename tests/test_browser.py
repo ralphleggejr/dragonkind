@@ -83,7 +83,7 @@ class BrowserFlow(unittest.TestCase):
                     'MFA_AUTO_SUBMIT': 'true' if auto_submit else 'false', 'AUTH_READY_SELECTOR': 'a.button[href="/archway"]' if forms else '.choice >> nth=0',
                     'CHOICES_SELECTOR': ('a.button[href="/archway"], button.button[type="submit"]:has-text("Brave Threshing"), button[data-page-next], label[for^="choice-"]' if forms else '.choice'), 'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form=choices]', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
-        settings.update(LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
+        settings.update(EMAIL_TYPING_DELAY_MS='0', LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
                         DEATH_NARRATIVE_SELECTOR='', COOLDOWN_SELECTOR='')
         if logout_flow:
             settings.update(DEATH_CONTINUE_SELECTOR='button.onward[data-page-next]',
@@ -295,7 +295,7 @@ class BrowserFlow(unittest.TestCase):
             page.set_default_timeout(2000)
             page.set_content("""<form><input id="email" name="reader" onchange="window.committed=this.value;setTimeout(()=>{window.readyAt=performance.now();document.querySelector('button').disabled=false},300)"><button type="button" disabled onclick="window.sent={email:new FormData(this.form).get('reader'),at:performance.now()}">Send me a code</button></form>""")
             with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_EMAIL_CASE': 'upper',
-                                        'EMAIL_SUBMIT_SELECTOR': 'button', 'EMAIL_SUBMIT_DELAY_SECONDS': '9999'}), \
+                                        'EMAIL_SUBMIT_SELECTOR': 'button', 'EMAIL_SUBMIT_DELAY_SECONDS': '9999', 'EMAIL_TYPING_DELAY_MS': '0'}), \
                  patch.object(page, 'wait_for_timeout', side_effect=AssertionError('Fixed browser sleep used')):
                 self.assertEqual(fill_login_email(page, 'leggejr.co@gmail.com'), 'LEGGEJR.CO@GMAIL.COM')
                 submit_login_code_request(page)
@@ -328,10 +328,27 @@ class BrowserFlow(unittest.TestCase):
                      '<form action="/enter" method="post"><input id="email" name="reader"><button id="send">Send me a code</button></form>'))
             page.goto('https://example.test/')
             with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'EMAIL_SUBMIT_SELECTOR': '#send',
-                                        'LOGIN_EMAIL_CASE': 'upper'}):
+                                        'LOGIN_EMAIL_CASE': 'upper', 'EMAIL_TYPING_DELAY_MS': '0'}):
                 fill_login_email(page, 'leggejr.co@gmail.com')
                 with self.assertRaisesRegex(LoginRequestRejected, 'HTTP 422'):
                     submit_login_code_request(page)
                 self.assertEqual(page.locator('h1').inner_text(), 'Say again?')
+        finally:
+            context.close()
+
+    def test_email_keyboard_events_finish_before_arrow_is_clicked_once(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content("""<form><input id="email" name="reader" onkeydown="window.keys=(window.keys||0)+1"><button aria-label="Send me a code" type="button" onclick="window.clicks=(window.clicks||0)+1;window.submitted=new FormData(this.form).get('reader');window.keyCountAtClick=window.keys">→</button></form>""")
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_EMAIL_CASE': 'upper',
+                                        'EMAIL_SUBMIT_SELECTOR': 'button[aria-label="Send me a code"]',
+                                        'EMAIL_TYPING_DELAY_MS': '5'}):
+                fill_login_email(page, 'leggejr.co@gmail.com')
+                self.assertIsNone(page.evaluate('window.clicks'))
+                submit_login_code_request(page)
+                self.assertEqual(page.evaluate('window.clicks'), 1)
+                self.assertEqual(page.evaluate('window.submitted'), 'LEGGEJR.CO@GMAIL.COM')
+                self.assertGreaterEqual(page.evaluate('window.keyCountAtClick'), len('LEGGEJR.CO@GMAIL.COM'))
         finally:
             context.close()
