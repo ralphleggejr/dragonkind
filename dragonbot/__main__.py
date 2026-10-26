@@ -12,7 +12,24 @@ REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECT
             'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER']
 
 
+def page_timeout_ms():
+    try:
+        seconds = int(os.environ.get('PAGE_LOAD_TIMEOUT_SECONDS', '120'))
+    except ValueError:
+        raise RuntimeError('PAGE_LOAD_TIMEOUT_SECONDS must be a positive integer') from None
+    if seconds <= 0:
+        raise RuntimeError('PAGE_LOAD_TIMEOUT_SECONDS must be a positive integer')
+    return seconds * 1000
+
+
+def configure_page(page):
+    timeout = page_timeout_ms()
+    page.set_default_timeout(timeout)
+    page.set_default_navigation_timeout(timeout)
+
+
 def configuration():
+    page_timeout_ms()
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise RuntimeError('Missing configuration: ' + ', '.join(missing))
@@ -49,7 +66,7 @@ def click_transition(page, target):
     url = page.url
     target.click()
     page.wait_for_function('(old) => document.body.innerText !== old.text || location.href !== old.url',
-                           arg={'text': before, 'url': url}, timeout=20000)
+                           arg={'text': before, 'url': url})
     # Missing or ambiguous choices after a transition fail closed.
     page.wait_for_load_state('domcontentloaded')
 
@@ -86,6 +103,13 @@ def complete_mfa(page, code):
     # Confirm the authenticated page without clicking its first story choice.
     page.locator(os.environ['AUTH_READY_SELECTOR']).wait_for(state='visible')
     field.wait_for(state='hidden')
+
+
+def wait_story_ready(page):
+    ready = page.locator(os.environ['CHOICES_SELECTOR']).or_(page.locator(os.environ['DEATH_SELECTOR']))
+    if os.environ.get('DEATH_NARRATIVE_SELECTOR'):
+        ready = ready.or_(page.locator(os.environ['DEATH_NARRATIVE_SELECTOR']))
+    ready.filter(visible=True).first.wait_for(state='visible')
 
 
 def finish_known_death_pages(page):
@@ -147,26 +171,36 @@ def play(browser, route, state, account):
     record = state['accounts'].setdefault(account, {})
     context = browser.new_context()
     page = context.new_page()
-    page.set_default_timeout(20000)
+    configure_page(page)
     authenticated = False
+    phase = 'loading the page'
     try:
         record.update(status='active', step=0)
         save_state(STATE, state)
+        print(f'Loading Dragonkind; waiting up to {page_timeout_ms() // 1000}s for login controls.', flush=True)
         page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+        phase = 'waiting for login controls'
         prepare_login(page)
+        print('Login controls are ready.', flush=True)
         page.locator(os.environ['EMAIL_SELECTOR']).fill(account)
         # Establish the UID boundary before requesting a new code. Old messages are ignored.
+        phase = 'connecting to Gmail inbox'
         with inbox() as client:
             boundary = highwater(client)
+            phase = 'requesting a login code'
             page.locator(os.environ['EMAIL_SUBMIT_SELECTOR']).click()
             page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
             print(f'Forward the new verification email for {account} to the configured inbox.', flush=True)
+            phase = 'waiting for the verification email'
             code = wait_code(client, boundary, account)
+        phase = 'completing login'
         complete_mfa(page, code)
         authenticated = True
+        phase = 'following the story route'
         for index, options in enumerate(route['steps']):
             record['step'] = index
             save_state(STATE, state)
+            wait_story_ready(page)
             if finish_known_death_pages(page):
                 break
             labels = visible(page, 'CHOICES_SELECTOR').all_inner_texts()
@@ -176,18 +210,20 @@ def play(browser, route, state, account):
                 return
             selection = choose(labels, options, allow_contains=index == len(route['steps']) - 1)
             execute_choice(page, visible(page, 'CHOICES_SELECTOR').nth(selection))
+        wait_story_ready(page)
         if not finish_known_death_pages(page):
             raise RuntimeError('Route ended without a confirmed death screen')
         # Start cooldown on confirmation, even if logout subsequently fails.
         record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')
         save_state(STATE, state)
+        phase = 'signing out after death'
         logout_after_death(page)
         record.update(status='cooldown', step=0)
         save_state(STATE, state)
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)
     except Exception as error:
         # Exception text can include sensitive DOM/input values; retain only its class.
-        alert(state, account, f'Unexpected page or operation failure ({type(error).__name__})', page if authenticated else None)
+        alert(state, account, f'Failure while {phase} ({type(error).__name__})', page if authenticated else None)
     finally:
         context.close()
 

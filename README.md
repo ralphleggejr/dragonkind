@@ -94,6 +94,10 @@ Selectors accept Playwright syntax, including CSS and `text=...`. Inspect the ac
 
 The default code regex matches the supplied “Your confirmation code is …” wording and accepts six letters/digits with an optional middle hyphen (for example, `A1B-2C3`). It avoids treating ordinary six-letter words in the email as codes. Forwarded plain-text Gmail messages are supported; HTML-only forwards are rejected. Start with one account in `route.json` while validating the flow, then restore the other accounts. Use separate folders and no concurrent runners for the same state volume.
 
+### Slow intro and page loads
+
+The illustrated intro can appear before the login controls become visible. The bot waits for visible controls instead of treating an HTTP 200 response or `DOMContentLoaded` as readiness. `PAGE_LOAD_TIMEOUT_SECONDS=120` controls each browser navigation/action/readiness wait, including login and story scenes. The bot proceeds as soon as the required controls appear; it does not sleep for the full timeout. You can increase this value locally for slower connections. It prints a loading message before the initial wait. A timeout still pauses the runner; a loading screen alone does not establish a new entry button or a broken selector.
+
 ## Build and run (both systems)
 
 Run these commands in Terminal on macOS or PowerShell on Windows, from the project folder, after saving all required settings:

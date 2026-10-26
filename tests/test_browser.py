@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -257,5 +257,33 @@ class BrowserFlow(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     finish_known_death_pages(page)
                 self.assertEqual(page.locator('body').inner_text(), 'Unexpected page')
+        finally:
+            context.close()
+
+    def test_slow_intro_waits_for_delayed_controls_and_uses_configured_timeout(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(100)
+            page.set_content("""<button id="welcome" hidden onclick="this.hidden=true;document.getElementById('email').hidden=false">Welcome, Candidate</button><input id="email" hidden><script>setTimeout(()=>document.getElementById('welcome').hidden=false, 700)</script>""")
+            with patch.dict(os.environ, {'PAGE_LOAD_TIMEOUT_SECONDS': '2', 'EMAIL_SELECTOR': '#email',
+                                        'LOGIN_ENTRY_SELECTOR': '#welcome'}):
+                configure_page(page)
+                prepare_login(page)
+                self.assertTrue(page.locator('#email').is_visible())
+                self.assertEqual(page.locator('#email').input_value(), '')
+        finally:
+            context.close()
+
+    def test_story_readiness_waits_for_controls_after_background_loads(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content("""<p>Loading scene artwork</p><button id="choice" hidden>Continue</button><script>setTimeout(()=>document.getElementById('choice').hidden=false, 200)</script>""")
+            with patch.dict(os.environ, {'PAGE_LOAD_TIMEOUT_SECONDS': '2', 'CHOICES_SELECTOR': '#choice',
+                                        'DEATH_SELECTOR': '#result', 'DEATH_NARRATIVE_SELECTOR': ''}):
+                configure_page(page)
+                wait_story_ready(page)
+                self.assertTrue(page.locator('#choice').is_visible())
         finally:
             context.close()
