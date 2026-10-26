@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email
+from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -14,6 +14,8 @@ ROUTE = json.loads(Path('route.json').read_text())
 class BrowserFlow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.flow_patch = patch.dict(os.environ, {'LOGIN_FLOW': 'custom'})
+        cls.flow_patch.start()
         cls.driver = sync_playwright().start()
         executable = os.environ.get('TEST_CHROMIUM_PATH') or shutil.which('chromium')
         try:
@@ -27,6 +29,7 @@ class BrowserFlow(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close()
         cls.driver.stop()
+        cls.flow_patch.stop()
 
     def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2, red_dragon=False, result_flow=False):
         rows = [[options[0], 'Other choice'] for options in ROUTE['steps']]
@@ -458,3 +461,65 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(boundary, 20)
         self.assertIsNone(failure)
         self.assertEqual(calls, 2)
+
+    def test_recorded_role_login_uses_click_fill_then_arrow_and_confirms_mfa(self):
+        context = self.browser.new_context()
+        submitted = []
+        def site(route):
+            request = route.request
+            path = __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(request.url).path
+            if request.method == 'POST':
+                submitted.append(__import__('urllib.parse', fromlist=['parse_qs']).parse_qs(request.post_data))
+                route.fulfill(content_type='text/html', body="""<label for="code">Six-character code</label><input id="code" oninput="if(this.value.length===6)location.href='/rotunda'">""")
+            elif path == '/code':
+                route.fulfill(content_type='text/html', body="""<label for="code">Six-character code</label><input id="code" oninput="if(this.value.length===6)location.href='/rotunda'">""")
+            elif path == '/rotunda':
+                route.fulfill(content_type='text/html', body='<a href="/archway" onclick="event.preventDefault();document.body.dataset.clicked=1">Brave Threshing</a>')
+            else:
+                route.fulfill(content_type='text/html', body="""<button onclick="this.hidden=true;document.querySelector('form').hidden=false">Welcome, Candidate</button><form hidden action="/enter" method="post"><label for="reader">Email Address</label><input id="reader" name="reader" onkeydown="let h=document.createElement('input');h.type='hidden';h.name='keyboard_event';h.value='1';this.form.appendChild(h)"><button aria-label="Send me a code">→</button></form>""")
+        context.route('https://dragonkind.com/**', site)
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'LOGIN_EMAIL_CASE': 'original', 'MFA_AUTO_SUBMIT': 'true'}):
+                replay_login_page(page, 'ralphleggejr@gmail.com')
+                self.assertEqual(submitted, [{'reader': ['ralphleggejr@gmail.com']}])
+                self.assertEqual(page.get_by_role('textbox', name='Six-character code').input_value(), '')
+                complete_mfa(page, '123456')
+                self.assertEqual(page.url, 'https://dragonkind.com/rotunda')
+                self.assertTrue(page.get_by_role('link', name='Brave Threshing').is_visible())
+                self.assertIsNone(page.locator('body').get_attribute('data-clicked'))
+        finally:
+            context.close()
+
+    def test_recorded_login_does_not_skip_failed_mfa_by_navigating_to_rotunda(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(500)
+            page.set_content('<label for="code">Six-character code</label><input id="code"><a href="/archway" hidden>Brave Threshing</a>')
+            requests = []
+            page.on('request', lambda request: requests.append(request.url))
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'MFA_AUTO_SUBMIT': 'true'}):
+                with self.assertRaises(BrowserTimeoutError):
+                    complete_mfa(page, '123456')
+            self.assertEqual(page.url, 'about:blank')
+            self.assertEqual(requests, [])
+        finally:
+            context.close()
+
+    def test_recorded_login_requires_authenticated_rotunda_content_not_just_url(self):
+        context = self.browser.new_context()
+        try:
+            context.route('https://dragonkind.com/rotunda', lambda route: route.fulfill(
+                content_type='text/html', body='<h1>Please sign in</h1><button>Welcome, Candidate</button>'))
+            page = context.new_page()
+            page.set_default_timeout(500)
+            page.set_content("""<label for="code">Six-character code</label><input id="code" oninput="if(this.value.length===6)document.body.innerHTML='&lt;p&gt;Code rejected&lt;/p&gt;'">""")
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'MFA_AUTO_SUBMIT': 'true'}):
+                with self.assertRaises(BrowserTimeoutError):
+                    complete_mfa(page, '123456')
+            self.assertEqual(page.locator('h1').inner_text(), 'Please sign in')
+            self.assertEqual(page.get_by_role('link', name='Brave Threshing').count(), 0)
+        finally:
+            context.close()

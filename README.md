@@ -96,7 +96,11 @@ The default code regex matches the supplied “Your confirmation code is …” 
 
 ### Email submission
 
-The runner submits the configured address in uppercase by default (`LOGIN_EMAIL_CASE=upper`), types it character by character (`EMAIL_TYPING_DELAY_MS=100` milliseconds per key by default), commits the field by moving focus, and clicks “Send me a code” as soon as the button is visible, enabled, stable, and able to receive the click. There is no fixed page-loading or post-entry sleep; the only pacing is between typed characters. The arrow is checked for actionability, then clicked once. The obsolete `EMAIL_SUBMIT_DELAY_SECONDS` setting is ignored and can be removed from existing `.env` files. For the current single-account trial this sends `LEGGEJR.CO@GMAIL.COM`. State/cooldown keys and mailbox matching still use the configured account identity. `LOGIN_EMAIL_CASE=original` preserves the original casing if needed. Native form submission waits for DOM readiness and reports its HTTP status. An HTTP 422 response reloads the login page, gets a fresh form/CSRF token, and retries once, refreshing the inbox UID boundary before each submission. A second rejection, HTTP 429, or other HTTP 4xx/5xx response pauses and saves the rejection-page screenshot; the bot does not wait for a code field on an explicitly rejected response. The site's observed HTTP 422 address rejection remains unresolved in live testing; timing changes alone do not establish that the server accepts the address.
+`LOGIN_FLOW=recorded` is the default and follows the supplied codegen recording: click **Welcome, Candidate**, click the **Email Address** textbox, fill the configured address, and click the **Send me a code** button. These controls are located by their exact accessible role/name. MFA uses the **Six-character code** textbox, and successful login requires the **Brave Threshing** link to appear and the code field to disappear. The automated runner still reads the current verification email from the configured inbox. After the code field disappears, recorded mode opens `/rotunda` as in the recording and requires the authenticated Brave Threshing link before proceeding; a URL change alone never counts as successful login.
+
+The default `LOGIN_EMAIL_CASE=original` preserves the configured email spelling/case. Existing `.env` files should set `LOGIN_FLOW=recorded` and `LOGIN_EMAIL_CASE=original` to match the successful recording. The CSS login selector settings and paced keyboard entry remain available with `LOGIN_FLOW=custom`; `EMAIL_TYPING_DELAY_MS` only applies in that mode. There is no fixed page-loading or post-entry sleep, and the obsolete `EMAIL_SUBMIT_DELAY_SECONDS` setting is ignored. Both modes wait for the control to be rendered/actionable before clicking.
+
+Native form submission waits for DOM readiness and reports its HTTP status. An HTTP 422 response closes the browser, opens a fresh browser/form, and retries once, refreshing the inbox UID boundary before each submission. A second rejection, HTTP 429, or other HTTP 4xx/5xx response pauses and saves the rejection-page screenshot. The Docker HTTP 422 rejection remains unresolved in live testing; the recorded locator/input changes have only been validated with local browser fixtures.
 
 ### Slow intro and page loads
 
@@ -213,3 +217,18 @@ The script prepares an ignored local `.venv`, installs the pinned Playwright ver
 Close the recorder browser when finished. Generated Python is saved in a timestamped `data/recording-*.py` file. Review it and remove verification-code literals before sharing it. Recording files stay local: `data/` is excluded from Git and Docker builds. Do not run the generated script automatically; it needs review and the scheduler/MFA logic added around the recorded actions. Codegen records locators and actions, not a full network diagnosis.
 
 The automation now launches and closes a separate Chromium process for every account run. An HTTP 422 retry closes the old context and browser before launching its replacement. Browser shutdown runs on success, pause, and failure. The lightweight scheduler stays alive between eligible runs to enforce cooldowns; no game browser is kept open while it waits. `docker compose down` stops the scheduler/container completely. Closing the browser does not erase the server's account state or the local cooldown/pause records.
+
+## Replay the recorded login on your Mac
+
+To reproduce the visible Chromium login from codegen, stop Docker and run:
+
+```bash
+cd "$HOME/Downloads/dragonkind-git"
+docker compose down
+git pull --ff-only
+bash scripts/replay-login-mac.sh ralphleggejr@gmail.com
+```
+
+This installs/uses native Playwright in `.venv`, opens a new visible browser, performs the recorded welcome → click email field → fill email → click arrow sequence, and waits for the code field. Enter the verification code directly in that browser. The replay waits for the code field to disappear, visits the recorded `/rotunda` URL, requires the Brave Threshing link to confirm login, then closes the entire browser. It stops before clicking any story choices. It does not load `.env`, read Gmail, record the code, save browser storage, reset the site's state, or change `data/state.json`. Supply another authorized account as the script's argument if needed. The normal Docker runner keeps automatic forwarded-email MFA and the full game route.
+
+The replay requests a real login code. If it gets HTTP 422, it reports that response and closes; it does not retry. Its native desktop execution still needs validation on your Mac. This test separates visible Mac Chromium from the Docker runtime while keeping the recorded login actions consistent.

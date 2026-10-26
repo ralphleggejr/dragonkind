@@ -42,7 +42,9 @@ def email_typing_delay_ms():
 def configuration():
     page_timeout_ms()
     email_typing_delay_ms()
-    if os.environ.get('LOGIN_EMAIL_CASE', 'upper') not in ('upper', 'original'):
+    if os.environ.get('LOGIN_FLOW', 'recorded') not in ('recorded', 'custom'):
+        raise RuntimeError('LOGIN_FLOW must be recorded or custom')
+    if os.environ.get('LOGIN_EMAIL_CASE', 'original') not in ('upper', 'original'):
         raise RuntimeError('LOGIN_EMAIL_CASE must be upper or original')
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
@@ -82,11 +84,27 @@ def wait_rendered(page, locator):
             element.dispose()
 
 
+RECORDED_LOGIN_ROLES = {
+    'LOGIN_ENTRY_SELECTOR': ('button', 'Welcome, Candidate'),
+    'EMAIL_SELECTOR': ('textbox', 'Email Address'),
+    'EMAIL_SUBMIT_SELECTOR': ('button', 'Send me a code'),
+    'MFA_SELECTOR': ('textbox', 'Six-character code'),
+    'AUTH_READY_SELECTOR': ('link', 'Brave Threshing'),
+}
+
+
+def login_locator(page, name):
+    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded' and name in RECORDED_LOGIN_ROLES:
+        role, label = RECORDED_LOGIN_ROLES[name]
+        return page.get_by_role(role, name=label, exact=True)
+    return page.locator(os.environ[name])
+
+
 def prepare_login(page):
-    email = page.locator(os.environ['EMAIL_SELECTOR'])
+    email = login_locator(page, 'EMAIL_SELECTOR')
     entry_selector = os.environ.get('LOGIN_ENTRY_SELECTOR')
-    if entry_selector:
-        entry = page.locator(entry_selector)
+    if entry_selector or os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+        entry = login_locator(page, 'LOGIN_ENTRY_SELECTOR')
         email.or_(entry).filter(visible=True).first.wait_for(state='visible')
         if not email.is_visible():
             wait_rendered(page, entry)
@@ -95,13 +113,18 @@ def prepare_login(page):
 
 
 def fill_login_email(page, account):
-    submitted = account.upper() if os.environ.get('LOGIN_EMAIL_CASE', 'upper') == 'upper' else account
-    field = page.locator(os.environ['EMAIL_SELECTOR'])
+    submitted = account.upper() if os.environ.get('LOGIN_EMAIL_CASE', 'original') == 'upper' else account
+    field = login_locator(page, 'EMAIL_SELECTOR')
     wait_rendered(page, field)
-    print('Entering login email with paced keystrokes.', flush=True)
-    field.fill('')
-    field.press_sequentially(submitted, delay=email_typing_delay_ms())
-    field.press('Tab')  # Commit input/change/blur before submitting the form.
+    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+        print('Entering login email using the recorded click/fill sequence.', flush=True)
+        field.click()
+        field.fill(submitted)
+    else:
+        print('Entering login email with paced keystrokes.', flush=True)
+        field.fill('')
+        field.press_sequentially(submitted, delay=email_typing_delay_ms())
+        field.press('Tab')
     if field.input_value() != submitted:
         raise RuntimeError('Email field does not contain the configured account')
     return submitted
@@ -114,9 +137,9 @@ class LoginRequestRejected(RuntimeError):
 
 
 def submit_login_code_request(page):
-    field = page.locator(os.environ['EMAIL_SELECTOR'])
+    field = login_locator(page, 'EMAIL_SELECTOR')
     native_post = field.evaluate('(e) => e.form?.method.toLowerCase() === "post"')
-    button = page.locator(os.environ['EMAIL_SUBMIT_SELECTOR']).filter(visible=True)
+    button = login_locator(page, 'EMAIL_SUBMIT_SELECTOR').filter(visible=True)
     wait_rendered(page, button)
     # Check actionability before the single actual arrow click; trial does not submit.
     button.click(trial=True)
@@ -187,15 +210,21 @@ def execute_choice(page, selection):
 
 
 def complete_mfa(page, code):
-    field = page.locator(os.environ['MFA_SELECTOR'])
+    field = login_locator(page, 'MFA_SELECTOR')
     field.fill('')
     # Real typing emits input and keyboard events used by auto-submit forms.
     field.press_sequentially(code)
     if os.environ.get('MFA_AUTO_SUBMIT', 'true').lower() == 'false':
         page.locator(os.environ['MFA_SUBMIT_SELECTOR']).click()
-    # Confirm the authenticated page without clicking its first story choice.
-    page.locator(os.environ['AUTH_READY_SELECTOR']).wait_for(state='visible')
-    field.wait_for(state='hidden')
+    confirm_login(page)
+
+
+def confirm_login(page):
+    # Only leave code entry after it disappears; the server must expose the story link.
+    login_locator(page, 'MFA_SELECTOR').wait_for(state='hidden')
+    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+        page.goto('https://dragonkind.com/rotunda', wait_until='domcontentloaded')
+    login_locator(page, 'AUTH_READY_SELECTOR').wait_for(state='visible')
 
 
 def wait_story_ready(page):
@@ -294,7 +323,7 @@ def play(browser, route, state, account, restart_browser=None):
                                            restart_page=restart_login_page if restart_browser else None)
             phase = 'waiting for the code-entry field'
             print('Send-code button clicked; waiting for the code-entry field.', flush=True)
-            page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
+            login_locator(page, 'MFA_SELECTOR').wait_for(state='visible')
             print(f'Forward the new verification email for {account} to the configured inbox.', flush=True)
             phase = 'waiting for the verification email'
             code = wait_code(client, boundary, account)
@@ -433,15 +462,47 @@ def diagnose_login(account):
             browser.close()
 
 
+def replay_login_page(page, account):
+    page.goto('https://dragonkind.com/', wait_until='domcontentloaded')
+    prepare_login(page)
+    fill_login_email(page, account)
+    submit_login_code_request(page)
+    login_locator(page, 'MFA_SELECTOR').wait_for(state='visible')
+
+
+def replay_login(account):
+    from playwright.sync_api import sync_playwright
+    # Reproduce the user's native, headed codegen session; no Gmail credentials needed.
+    os.environ['LOGIN_FLOW'] = 'recorded'
+    os.environ['LOGIN_EMAIL_CASE'] = 'original'
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=False)
+        context = browser.new_context()
+        try:
+            page = context.new_page()
+            configure_page(page)
+            replay_login_page(page, account)
+            print('Enter the verification code directly in the browser. Do not paste it here.', flush=True)
+            confirm_login(page)
+            print('Login confirmed: Brave Threshing is available. No story choices were clicked.', flush=True)
+        finally:
+            context.close()
+            browser.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login'])
+    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login', 'replay-login'])
     parser.add_argument('--account')
     parser.add_argument('--confirm-site-reset', action='store_true')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
         print('Required settings present. Live selectors, email access and site flow remain unverified.')
+    elif args.command == 'replay-login':
+        if not args.account:
+            parser.error('replay-login requires --account')
+        replay_login(args.account)
     elif args.command == 'diagnose-login':
         if not args.account:
             parser.error('diagnose-login requires --account')
