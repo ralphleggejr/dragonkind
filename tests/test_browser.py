@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login
+from dragonbot.__main__ import play, prepare_login, complete_mfa
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -28,7 +28,7 @@ class BrowserFlow(unittest.TestCase):
         cls.browser.close()
         cls.driver.stop()
 
-    def exercise(self, shadow=False, mail_failure=False, mismatch=False):
+    def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False):
         rows = [[options[0], 'Other choice'] for options in ROUTE['steps']]
         if mismatch:
             rows[0] = ['Unrecognized choice']
@@ -44,13 +44,16 @@ class BrowserFlow(unittest.TestCase):
         }
         function next() { n++; draw(); } draw();
         </script></body></html>'''.replace('ROWS', json.dumps(rows))
+        if auto_submit:
+            html = html.replace('<input id="mfa">', '<input id="mfa" oninput="if(this.value.length===6)next()">')
         context = self.browser.new_context()
         context.route('https://dragonkind.com/**', lambda route: route.fulfill(body=html, content_type='text/html'))
         wrapped_browser = MagicMock()
         wrapped_browser.new_context.return_value = context
         state = {'accounts': {}, 'global_pause': False}
         settings = {'EMAIL_SELECTOR': 'input[type=email]', 'EMAIL_SUBMIT_SELECTOR': '#email',
-                    'MFA_SELECTOR': '#mfa', 'MFA_SUBMIT_SELECTOR': '#submit',
+                    'MFA_SELECTOR': '#mfa', 'MFA_SUBMIT_SELECTOR': '' if auto_submit else '#submit',
+                    'MFA_AUTO_SUBMIT': 'true' if auto_submit else 'false', 'AUTH_READY_SELECTOR': '.choice >> nth=0',
                     'CHOICES_SELECTOR': '.choice', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
         previous = Path.cwd()
@@ -114,5 +117,23 @@ class BrowserFlow(unittest.TestCase):
             with patch.dict(os.environ, {'EMAIL_SELECTOR': '#next-reader',
                                         'LOGIN_ENTRY_SELECTOR': 'button[data-reveal-trigger][data-step="4"]'}):
                 prepare_login(page)
+        finally:
+            context.close()
+
+    def test_full_route_after_automatic_mfa_submission(self):
+        state, _ = self.exercise(auto_submit=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+
+    def test_auto_mfa_does_not_click_first_story_link(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content("""<input id="next-code" oninput="if(this.value.length===7)document.body.innerHTML='&lt;a class=button href=/archway&gt;Brave Threshing&lt;/a&gt;'">""")
+            with patch.dict(os.environ, {'MFA_SELECTOR': '#next-code', 'MFA_AUTO_SUBMIT': 'true',
+                                        'AUTH_READY_SELECTOR': 'a.button[href="/archway"]',
+                                        'MFA_SUBMIT_SELECTOR': ''}):
+                complete_mfa(page, 'A1B-2C3')
+                self.assertTrue(page.locator('a.button[href="/archway"]').is_visible())
+                self.assertEqual(page.url, 'about:blank')
         finally:
             context.close()

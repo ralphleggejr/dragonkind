@@ -8,7 +8,7 @@ from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
 REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECTOR',
-            'MFA_SELECTOR', 'MFA_SUBMIT_SELECTOR', 'CHOICES_SELECTOR', 'DEATH_SELECTOR',
+            'MFA_SELECTOR', 'AUTH_READY_SELECTOR', 'CHOICES_SELECTOR', 'DEATH_SELECTOR',
             'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER']
 
 
@@ -16,6 +16,11 @@ def configuration():
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise RuntimeError('Missing configuration: ' + ', '.join(missing))
+    auto = os.environ.get('MFA_AUTO_SUBMIT', 'true').lower()
+    if auto not in ('true', 'false'):
+        raise RuntimeError('MFA_AUTO_SUBMIT must be true or false')
+    if auto == 'false' and not os.environ.get('MFA_SUBMIT_SELECTOR'):
+        raise RuntimeError('MFA_SUBMIT_SELECTOR is required when MFA_AUTO_SUBMIT=false')
     scope = os.environ.get('SHADOW_PAUSE_SCOPE', 'account')
     if scope not in ('global', 'account'):
         raise RuntimeError('SHADOW_PAUSE_SCOPE must be global or account')
@@ -45,6 +50,18 @@ def click_transition(page, target):
                            arg={'text': before, 'url': url}, timeout=20000)
     # Missing or ambiguous choices after a transition fail closed.
     page.wait_for_load_state('domcontentloaded')
+
+
+def complete_mfa(page, code):
+    field = page.locator(os.environ['MFA_SELECTOR'])
+    field.fill('')
+    # Real typing emits input and keyboard events used by auto-submit forms.
+    field.press_sequentially(code, delay=50)
+    if os.environ.get('MFA_AUTO_SUBMIT', 'true').lower() == 'false':
+        page.locator(os.environ['MFA_SUBMIT_SELECTOR']).click()
+    # Confirm the authenticated page without clicking its first story choice.
+    page.locator(os.environ['AUTH_READY_SELECTOR']).wait_for(state='visible')
+    field.wait_for(state='hidden')
 
 
 def alert(state, account, reason, page=None, global_pause=True):
@@ -86,8 +103,7 @@ def play(browser, route, state, account):
             page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
             print(f'Forward the new verification email for {account} to the configured inbox.', flush=True)
             code = wait_code(client, boundary, account)
-        page.locator(os.environ['MFA_SELECTOR']).fill(code)
-        click_transition(page, page.locator(os.environ['MFA_SUBMIT_SELECTOR']))
+        complete_mfa(page, code)
         authenticated = True
         for index, options in enumerate(route['steps']):
             record['step'] = index

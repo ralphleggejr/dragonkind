@@ -72,13 +72,16 @@ Required live-site configuration:
 | `LOGIN_ENTRY_SELECTOR` | Optional welcome button that reveals the login form; supplied HTML uses `button[data-reveal-trigger][data-step="4"]` |
 | `EMAIL_SELECTOR` | Email login field; supplied HTML uses `#next-reader` (a text input, not type=email) |
 | `EMAIL_SUBMIT_SELECTOR` | Supplied HTML uses `button[aria-label="Send me a code"][type="submit"]` |
-| `MFA_SELECTOR`, `MFA_SUBMIT_SELECTOR` | Code field and confirmation button |
+| `MFA_SELECTOR` | Code field: `#next-code` |
+| `MFA_AUTO_SUBMIT` | `true`: entering the code automatically advances; no submit click |
+| `MFA_SUBMIT_SELECTOR` | Optional; required only if `MFA_AUTO_SUBMIT=false` |
+| `AUTH_READY_SELECTOR` | Post-login marker: `a.button[href="/archway"]` (“Brave Threshing”); waited for, not clicked during authentication |
 | `CHOICES_SELECTOR` | Only story choices, in their displayed order; exclude menus/navigation |
 | `DEATH_SELECTOR` | Element unique to the confirmed death screen |
 | `SIGN_OUT_SELECTOR` | Logout control available on that death screen |
 | `MFA_ORIGINAL_SENDER` | Confirmed sender: `hello@dragonkind.com` |
 
-`MFA_SELECTOR` is confirmed as `#next-code`. The MFA submit button, story choices, death screen, and logout selectors are still unverified and must be supplied. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
+`MFA_SELECTOR` is confirmed as `#next-code`. Code entry automatically advances to the page containing “Brave Threshing.” Set `MFA_AUTO_SUBMIT=true` and `AUTH_READY_SELECTOR=a.button[href="/archway"]`; leave `MFA_SUBMIT_SELECTOR` blank. Story choices on subsequent pages, the death screen, and logout selectors are still unverified and must be supplied. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
 
 Selectors accept Playwright syntax, including CSS and `text=...`. Inspect the actual site in browser developer tools. Do not invent selectors or use a broad `button` selector. A password step, iframe, custom code widget, differently structured story branches, or a logout confirmation may require adapting this prototype after live inspection.
 
