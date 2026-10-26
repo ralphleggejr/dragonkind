@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -83,7 +83,7 @@ class BrowserFlow(unittest.TestCase):
                     'MFA_AUTO_SUBMIT': 'true' if auto_submit else 'false', 'AUTH_READY_SELECTOR': 'a.button[href="/archway"]' if forms else '.choice >> nth=0',
                     'CHOICES_SELECTOR': ('a.button[href="/archway"], button.button[type="submit"]:has-text("Brave Threshing"), button[data-page-next], label[for^="choice-"]' if forms else '.choice'), 'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form=choices]', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
-        settings.update(EMAIL_SUBMIT_DELAY_SECONDS='0', LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
+        settings.update(LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
                         DEATH_NARRATIVE_SELECTOR='', COOLDOWN_SELECTOR='')
         if logout_flow:
             settings.update(DEATH_CONTINUE_SELECTOR='button.onward[data-page-next]',
@@ -288,21 +288,34 @@ class BrowserFlow(unittest.TestCase):
         finally:
             context.close()
 
-    def test_exact_uppercase_email_committed_and_waited_before_submission(self):
+    def test_email_committed_and_submit_waits_for_enabled_button_without_fixed_delay(self):
         context = self.browser.new_context()
         try:
             page = context.new_page()
-            page.set_content("""<form><input id="email" name="reader" oninput="window.inputAt=performance.now()" onchange="window.committed=this.value"><button type="button" onclick="window.sent={email:new FormData(this.form).get('reader'),elapsed:performance.now()-window.inputAt}">Send me a code</button></form>""")
+            page.set_default_timeout(2000)
+            page.set_content("""<form><input id="email" name="reader" onchange="window.committed=this.value;setTimeout(()=>{window.readyAt=performance.now();document.querySelector('button').disabled=false},300)"><button type="button" disabled onclick="window.sent={email:new FormData(this.form).get('reader'),at:performance.now()}">Send me a code</button></form>""")
             with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_EMAIL_CASE': 'upper',
-                                        'EMAIL_SUBMIT_DELAY_SECONDS': '1'}):
+                                        'EMAIL_SUBMIT_SELECTOR': 'button', 'EMAIL_SUBMIT_DELAY_SECONDS': '9999'}), \
+                 patch.object(page, 'wait_for_timeout', side_effect=AssertionError('Fixed browser sleep used')):
                 self.assertEqual(fill_login_email(page, 'leggejr.co@gmail.com'), 'LEGGEJR.CO@GMAIL.COM')
-                page.locator('button').click()
+                submit_login_code_request(page)
                 sent = page.evaluate('window.sent')
                 self.assertEqual(sent['email'], 'LEGGEJR.CO@GMAIL.COM')
-                self.assertGreaterEqual(sent['elapsed'], 1000)
+                self.assertGreaterEqual(sent['at'], page.evaluate('window.readyAt'))
                 self.assertEqual(page.evaluate('window.committed'), 'LEGGEJR.CO@GMAIL.COM')
         finally:
             context.close()
+
+    def test_browser_timeout_defaults_to_five_minutes_and_cannot_exceed_cap(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(page_timeout_ms(), 300000)
+        with patch.dict(os.environ, {'PAGE_LOAD_TIMEOUT_SECONDS': '900'}):
+            self.assertEqual(page_timeout_ms(), 300000)
+        with patch.dict(os.environ, {'PAGE_LOAD_TIMEOUT_SECONDS': '1'}):
+            self.assertEqual(page_timeout_ms(), 1000)
+        with patch.dict(os.environ, {'PAGE_LOAD_TIMEOUT_SECONDS': '0'}):
+            with self.assertRaises(RuntimeError):
+                page_timeout_ms()
 
     def test_native_login_rejection_is_reported_without_waiting_for_mfa(self):
         context = self.browser.new_context()
@@ -315,7 +328,7 @@ class BrowserFlow(unittest.TestCase):
                      '<form action="/enter" method="post"><input id="email" name="reader"><button id="send">Send me a code</button></form>'))
             page.goto('https://example.test/')
             with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'EMAIL_SUBMIT_SELECTOR': '#send',
-                                        'LOGIN_EMAIL_CASE': 'upper', 'EMAIL_SUBMIT_DELAY_SECONDS': '0'}):
+                                        'LOGIN_EMAIL_CASE': 'upper'}):
                 fill_login_email(page, 'leggejr.co@gmail.com')
                 with self.assertRaisesRegex(LoginRequestRejected, 'HTTP 422'):
                     submit_login_code_request(page)

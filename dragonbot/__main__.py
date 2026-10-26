@@ -14,12 +14,12 @@ REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECT
 
 def page_timeout_ms():
     try:
-        seconds = int(os.environ.get('PAGE_LOAD_TIMEOUT_SECONDS', '120'))
+        seconds = int(os.environ.get('PAGE_LOAD_TIMEOUT_SECONDS', '300'))
     except ValueError:
         raise RuntimeError('PAGE_LOAD_TIMEOUT_SECONDS must be a positive integer') from None
     if seconds <= 0:
         raise RuntimeError('PAGE_LOAD_TIMEOUT_SECONDS must be a positive integer')
-    return seconds * 1000
+    return min(seconds, 300) * 1000
 
 
 def configure_page(page):
@@ -28,19 +28,8 @@ def configure_page(page):
     page.set_default_navigation_timeout(timeout)
 
 
-def email_submit_delay_ms():
-    try:
-        milliseconds = int(os.environ.get('EMAIL_SUBMIT_DELAY_SECONDS', '1')) * 1000
-    except ValueError:
-        raise RuntimeError('EMAIL_SUBMIT_DELAY_SECONDS must be a nonnegative integer') from None
-    if milliseconds < 0:
-        raise RuntimeError('EMAIL_SUBMIT_DELAY_SECONDS must be a nonnegative integer')
-    return milliseconds
-
-
 def configuration():
     page_timeout_ms()
-    email_submit_delay_ms()
     if os.environ.get('LOGIN_EMAIL_CASE', 'upper') not in ('upper', 'original'):
         raise RuntimeError('LOGIN_EMAIL_CASE must be upper or original')
     missing = [name for name in REQUIRED if not os.environ.get(name)]
@@ -81,7 +70,6 @@ def fill_login_email(page, account):
     field.press('Tab')  # Commit input/change/blur before submitting the form.
     if field.input_value() != submitted:
         raise RuntimeError('Email field does not contain the configured account')
-    page.wait_for_timeout(email_submit_delay_ms())
     return submitted
 
 
@@ -132,6 +120,7 @@ def execute_choice(page, selection):
     page.wait_for_function('(id) => document.getElementById(id)?.checked === true', arg=control_id)
     # Selection alone does not advance the story; submit only after it is checked.
     submit = visible(page, 'CHOICE_SUBMIT_SELECTOR')
+    submit.first.wait_for(state='visible')
     if submit.count() != 1:
         raise RuntimeError('Expected one visible choice submit button')
     click_transition(page, submit)
@@ -141,7 +130,7 @@ def complete_mfa(page, code):
     field = page.locator(os.environ['MFA_SELECTOR'])
     field.fill('')
     # Real typing emits input and keyboard events used by auto-submit forms.
-    field.press_sequentially(code, delay=50)
+    field.press_sequentially(code)
     if os.environ.get('MFA_AUTO_SUBMIT', 'true').lower() == 'false':
         page.locator(os.environ['MFA_SUBMIT_SELECTOR']).click()
     # Confirm the authenticated page without clicking its first story choice.
