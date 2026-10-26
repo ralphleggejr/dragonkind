@@ -181,6 +181,23 @@ class Decisions(unittest.TestCase):
             run_account(engine, {}, {}, 'one@gmail.com')
         self.assertEqual(events, ['launch-first', 'close-first', 'launch-second', 'close-second'])
 
+    def test_manual_browser_closure_reports_cancel_without_traceback(self):
+        from dragonbot.__main__ import replay_login
+        from playwright.sync_api import Error as BrowserError
+        from unittest.mock import MagicMock
+        engine = MagicMock()
+        browser = engine.chromium.launch.return_value
+        context = browser.new_context.return_value
+        page = context.new_page.return_value
+        page.is_closed.return_value = True
+        with patch.dict(os.environ, {}), \
+             patch('playwright.sync_api.sync_playwright') as driver, \
+             patch('dragonbot.__main__.replay_login_page', side_effect=BrowserError('fixture window closed')):
+            driver.return_value.__enter__.return_value = engine
+            self.assertFalse(replay_login('ralphleggejr@gmail.com'))
+            context.close.assert_called_once()
+            browser.close.assert_called_once()
+
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())
         self.assertEqual(len(set(route['accounts'])), 8)

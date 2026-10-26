@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -521,5 +521,50 @@ class BrowserFlow(unittest.TestCase):
                     complete_mfa(page, '123456')
             self.assertEqual(page.locator('h1').inner_text(), 'Please sign in')
             self.assertEqual(page.get_by_role('link', name='Brave Threshing').count(), 0)
+        finally:
+            context.close()
+
+    def test_forwarded_mail_is_fetched_and_entered_automatically_without_starting_game(self):
+        context = self.browser.new_context()
+        def site(route):
+            request = route.request
+            path = __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(request.url).path
+            if request.method == 'POST':
+                body = """<label for="code">Six-character code</label><input id="code" oninput="if(this.value.length===6)location.href='/rotunda'">"""
+            elif path == '/rotunda':
+                body = '<p id="cooldown-label">You can brave Threshing again in</p><button popovertarget="profile">Profile</button><div id="profile" popover></div>'
+            else:
+                body = '<form method="post" action="/enter"><label for="reader">Email Address</label><input id="reader" name="reader"><button aria-label="Send me a code">→</button></form>'
+            route.fulfill(content_type='text/html', body=body)
+        context.route('https://dragonkind.com/**', site)
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'LOGIN_EMAIL_CASE': 'original', 'MFA_AUTO_SUBMIT': 'true'}), \
+                 patch('dragonbot.__main__.inbox') as mailbox, \
+                 patch('dragonbot.__main__.highwater', return_value=42), \
+                 patch('dragonbot.__main__.wait_code', return_value='123456') as code_reader, \
+                 patch('dragonbot.__main__.save_state') as save:
+                status = mail_login_page(page, 'ralphleggejr@gmail.com')
+                self.assertEqual(status, 'cooldown')
+                code_reader.assert_called_once_with(mailbox.return_value.__enter__.return_value, 42, 'ralphleggejr@gmail.com')
+                save.assert_not_called()
+                self.assertEqual(page.url, 'https://dragonkind.com/rotunda')
+                self.assertIsNone(page.locator('body').get_attribute('data-clicked'))
+        finally:
+            context.close()
+
+    def test_manual_replay_recognizes_progressed_authenticated_game_page(self):
+        context = self.browser.new_context()
+        try:
+            context.route('https://dragonkind.com/play', lambda route: route.fulfill(content_type='text/html',
+                body='<button popovertarget="profile">Profile</button><form id="choices"><input id="choice-0" type="radio"><label for="choice-0">Head deeper into the forest</label></form>'))
+            page = context.new_page()
+            page.set_default_timeout(1000)
+            page.goto('https://dragonkind.com/play')
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded'}):
+                self.assertEqual(confirm_login(page, allow_existing_session=True), 'in_progress')
+                self.assertEqual(page.url, 'https://dragonkind.com/play')
+                self.assertFalse(page.locator('#choice-0').is_checked())
         finally:
             context.close()

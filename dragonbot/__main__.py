@@ -209,22 +209,40 @@ def execute_choice(page, selection):
     click_transition(page, submit)
 
 
-def complete_mfa(page, code):
+def complete_mfa(page, code, allow_existing_session=False):
     field = login_locator(page, 'MFA_SELECTOR')
     field.fill('')
     # Real typing emits input and keyboard events used by auto-submit forms.
     field.press_sequentially(code)
     if os.environ.get('MFA_AUTO_SUBMIT', 'true').lower() == 'false':
         page.locator(os.environ['MFA_SUBMIT_SELECTOR']).click()
-    confirm_login(page)
+    return confirm_login(page, allow_existing_session=allow_existing_session)
 
 
-def confirm_login(page):
-    # Only leave code entry after it disappears; the server must expose the story link.
+def confirm_login(page, allow_existing_session=False):
+    # The URL alone never proves authentication; require a logged-in UI marker.
     login_locator(page, 'MFA_SELECTOR').wait_for(state='hidden')
-    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+    recorded = os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded'
+    authenticated_paths = ('/rotunda', '/archway', '/play')
+    if recorded and urlsplit(page.url).path not in authenticated_paths:
         page.goto('https://dragonkind.com/rotunda', wait_until='domcontentloaded')
-    login_locator(page, 'AUTH_READY_SELECTOR').wait_for(state='visible')
+    ready = login_locator(page, 'AUTH_READY_SELECTOR')
+    if not (recorded and allow_existing_session):
+        ready.wait_for(state='visible')
+        return 'ready'
+    cooldown = page.locator('#cooldown-label')
+    profile = page.locator('button[popovertarget="profile"]')
+    archway = page.get_by_role('button', name='Brave Threshing', exact=True)
+    story = page.locator('form#choices label[for^="choice-"]')
+    ready.or_(cooldown).or_(profile).or_(archway).or_(story).filter(visible=True).first.wait_for(state='visible')
+    current = urlsplit(page.url)
+    if current.hostname != 'dragonkind.com' or current.path not in authenticated_paths:
+        raise RuntimeError('Expected an authenticated Dragonkind page')
+    if cooldown.is_visible():
+        return 'cooldown'
+    if ready.is_visible():
+        return 'ready'
+    return 'in_progress' if current.path in ('/archway', '/play') else 'authenticated'
 
 
 def wait_story_ready(page):
@@ -470,39 +488,79 @@ def replay_login_page(page, account):
     login_locator(page, 'MFA_SELECTOR').wait_for(state='visible')
 
 
-def replay_login(account):
-    from playwright.sync_api import sync_playwright
-    # Reproduce the user's native, headed codegen session; no Gmail credentials needed.
+def mail_login_page(page, account):
+    page.goto('https://dragonkind.com/', wait_until='domcontentloaded')
+    prepare_login(page)
+    with inbox() as client:
+        boundary = highwater(client)
+        fill_login_email(page, account)
+        submit_login_code_request(page)
+        login_locator(page, 'MFA_SELECTOR').wait_for(state='visible')
+        print('Waiting for the new forwarded verification email; leave the browser untouched.', flush=True)
+        code = wait_code(client, boundary, account)
+    return complete_mfa(page, code, allow_existing_session=True)
+
+
+def replay_login(account, automatic=False):
+    from playwright.sync_api import sync_playwright, Error as BrowserError
+    if automatic:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=Path(".env"), override=False)
+        missing = [name for name in ("MAIL_USER", "MAIL_PASSWORD", "MFA_ORIGINAL_SENDER") if not os.environ.get(name)]
+        if missing:
+            raise RuntimeError("Missing mail settings: " + ", ".join(missing))
+    # Use native headed Chromium; automatic mode reads only local mail bindings.
     os.environ['LOGIN_FLOW'] = 'recorded'
     os.environ['LOGIN_EMAIL_CASE'] = 'original'
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context()
+        context = None
+        page = None
         try:
+            context = browser.new_context()
             page = context.new_page()
             configure_page(page)
-            replay_login_page(page, account)
-            print('Enter the verification code directly in the browser. Do not paste it here.', flush=True)
-            confirm_login(page)
-            print('Login confirmed: Brave Threshing is available. No story choices were clicked.', flush=True)
+            if automatic:
+                status = mail_login_page(page, account)
+            else:
+                replay_login_page(page, account)
+                print('Enter the verification code directly in the browser. Do not click story links.', flush=True)
+                status = confirm_login(page, allow_existing_session=True)
+            print(f'Login confirmed ({status}). No story choices were clicked.', flush=True)
+            return True
+        except BrowserError as error:
+            if (page is not None and page.is_closed()) or not browser.is_connected():
+                print('Browser closed before login confirmation; test cancelled. Email delivery may still have succeeded.', flush=True)
+                return False
+            print(f'Login test stopped ({type(error).__name__}); no game choices were made.', flush=True)
+            return False
+        except LoginRequestRejected as error:
+            print(f'Login test rejected: {error}. No game choices were made.', flush=True)
+            return False
+        except Exception as error:
+            # Avoid third-party exception text that might contain entered codes.
+            print(f'Login test stopped ({type(error).__name__}); no game choices were made.', flush=True)
+            return False
         finally:
-            context.close()
+            if context is not None:
+                context.close()
             browser.close()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login', 'replay-login'])
+    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login', 'replay-login', 'desktop-login'])
     parser.add_argument('--account')
     parser.add_argument('--confirm-site-reset', action='store_true')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
         print('Required settings present. Live selectors, email access and site flow remain unverified.')
-    elif args.command == 'replay-login':
+    elif args.command in ('replay-login', 'desktop-login'):
         if not args.account:
-            parser.error('replay-login requires --account')
-        replay_login(args.account)
+            parser.error(f'{args.command} requires --account')
+        if replay_login(args.account, automatic=args.command == 'desktop-login') is False:
+            raise SystemExit(2)
     elif args.command == 'diagnose-login':
         if not args.account:
             parser.error('diagnose-login requires --account')

@@ -1,6 +1,6 @@
 # Dragonkind automation
 
-Dockerized Python/Playwright runner for eight configured accounts. **Prototype: the live site's selectors, login flow, and death detection have not been validated.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+Dockerized Python/Playwright runner for eight configured accounts. **Prototype: the full automated login/game workflow and live death detection have not yet been validated.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
 
 ## Behavior
 
@@ -13,7 +13,7 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 
 ## Before you start
 
-This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Real Gmail access and the actual website flow have not been verified. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Automatic MFA retrieval, the full game route, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
 
 Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. All commands below assume your project folder is named `dragonkind` in Downloads; change the path to match your copy.
 
@@ -229,6 +229,21 @@ git pull --ff-only
 bash scripts/replay-login-mac.sh ralphleggejr@gmail.com
 ```
 
-This installs/uses native Playwright in `.venv`, opens a new visible browser, performs the recorded welcome → click email field → fill email → click arrow sequence, and waits for the code field. Enter the verification code directly in that browser. The replay waits for the code field to disappear, visits the recorded `/rotunda` URL, requires the Brave Threshing link to confirm login, then closes the entire browser. It stops before clicking any story choices. It does not load `.env`, read Gmail, record the code, save browser storage, reset the site's state, or change `data/state.json`. Supply another authorized account as the script's argument if needed. The normal Docker runner keeps automatic forwarded-email MFA and the full game route.
+This installs/uses native Playwright in `.venv`, opens a new visible browser, performs the recorded welcome → click email field → fill email → click arrow sequence, and waits for the code field. Enter the verification code directly in that browser. The replay waits for the code field to disappear, visits the recorded `/rotunda` URL when needed, and confirms authenticated UI (Brave Threshing, Profile, a cooldown, or an already-started game) before closing the entire browser. It stops before clicking any story choices. It does not load `.env`, read Gmail, record the code, save browser storage, reset the site's state, or change `data/state.json`. Supply another authorized account as the script's argument if needed. The normal Docker runner keeps automatic forwarded-email MFA and the full game route.
 
 The replay requests a real login code. If it gets HTTP 422, it reports that response and closes; it does not retry. Its native desktop execution still needs validation on your Mac. This test separates visible Mac Chromium from the Docker runtime while keeping the recorded login actions consistent.
+
+## Test automatic forwarded-email MFA in a visible Mac browser
+
+After a successful code request/forwarding test, test inbox matching and automatic code entry without starting a game:
+
+```bash
+cd "$HOME/Downloads/dragonkind-git"
+docker compose down
+git pull --ff-only
+bash scripts/test-login-mac.sh ralphleggejr@gmail.com
+```
+
+This launcher installs native Playwright and python-dotenv in `.venv`, opens visible Chromium, and reads mail settings from the local `.env` without overriding existing exported values. It establishes a fresh inbox UID boundary, requests one login code, waits for the matching forwarded email, and fills MFA automatically. Leave the browser untouched during this test; do not enter the code or click Brave Threshing yourself. The browser closes after authenticated UI is confirmed. A cooldown label or an already-started game can also confirm authentication, without starting/restarting the story. It does not modify pause/cooldown state, persist browser storage, record codes, or make game choices. Native Mac success does not establish Docker readiness.
+
+The manual replay now reports user-closed windows as a cancelled test instead of a TargetClosedError traceback. Navigation to the recorded Rotunda URL happens only when the code field has disappeared and the browser has not already reached Rotunda, Archway, or Play; authenticated UI markers are still required. If you manually click through while replay is waiting, it can recognize authenticated game UI, but it never clicks those story controls itself.
