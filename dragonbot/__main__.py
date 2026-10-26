@@ -28,8 +28,21 @@ def configure_page(page):
     page.set_default_navigation_timeout(timeout)
 
 
+def email_submit_delay_ms():
+    try:
+        milliseconds = int(os.environ.get('EMAIL_SUBMIT_DELAY_SECONDS', '1')) * 1000
+    except ValueError:
+        raise RuntimeError('EMAIL_SUBMIT_DELAY_SECONDS must be a nonnegative integer') from None
+    if milliseconds < 0:
+        raise RuntimeError('EMAIL_SUBMIT_DELAY_SECONDS must be a nonnegative integer')
+    return milliseconds
+
+
 def configuration():
     page_timeout_ms()
+    email_submit_delay_ms()
+    if os.environ.get('LOGIN_EMAIL_CASE', 'upper') not in ('upper', 'original'):
+        raise RuntimeError('LOGIN_EMAIL_CASE must be upper or original')
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise RuntimeError('Missing configuration: ' + ', '.join(missing))
@@ -59,6 +72,37 @@ def prepare_login(page):
         if not email.is_visible():
             entry.click()
     email.wait_for(state='visible')
+
+
+def fill_login_email(page, account):
+    submitted = account.upper() if os.environ.get('LOGIN_EMAIL_CASE', 'upper') == 'upper' else account
+    field = page.locator(os.environ['EMAIL_SELECTOR'])
+    field.fill(submitted)
+    field.press('Tab')  # Commit input/change/blur before submitting the form.
+    if field.input_value() != submitted:
+        raise RuntimeError('Email field does not contain the configured account')
+    page.wait_for_timeout(email_submit_delay_ms())
+    return submitted
+
+
+class LoginRequestRejected(RuntimeError):
+    pass
+
+
+def submit_login_code_request(page):
+    field = page.locator(os.environ['EMAIL_SELECTOR'])
+    native_post = field.evaluate('(e) => e.form?.method.toLowerCase() === "post"')
+    button = page.locator(os.environ['EMAIL_SUBMIT_SELECTOR'])
+    if native_post:
+        with page.expect_navigation(wait_until='domcontentloaded') as navigation:
+            button.click(no_wait_after=True)
+        response = navigation.value
+        if response is not None:
+            print(f'Login form response: HTTP {response.status}', flush=True)
+            if response.status >= 400:
+                raise LoginRequestRejected(f'HTTP {response.status}')
+    else:
+        button.click()
 
 
 def click_transition(page, target):
@@ -182,13 +226,17 @@ def play(browser, route, state, account):
         phase = 'waiting for login controls'
         prepare_login(page)
         print('Login controls are ready.', flush=True)
-        page.locator(os.environ['EMAIL_SELECTOR']).fill(account)
         # Establish the UID boundary before requesting a new code. Old messages are ignored.
         phase = 'connecting to Gmail inbox'
         with inbox() as client:
             boundary = highwater(client)
-            phase = 'requesting a login code'
-            page.locator(os.environ['EMAIL_SUBMIT_SELECTOR']).click()
+            phase = 'preparing the login email'
+            submitted = fill_login_email(page, account)
+            print(f'Requesting login code for {submitted}.', flush=True)
+            phase = 'submitting the login email'
+            submit_login_code_request(page)
+            phase = 'waiting for the code-entry field'
+            print('Send-code button clicked; waiting for the code-entry field.', flush=True)
             page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
             print(f'Forward the new verification email for {account} to the configured inbox.', flush=True)
             phase = 'waiting for the verification email'
@@ -223,7 +271,9 @@ def play(browser, route, state, account):
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)
     except Exception as error:
         # Exception text can include sensitive DOM/input values; retain only its class.
-        alert(state, account, f'Failure while {phase} ({type(error).__name__})', page if authenticated else None)
+        detail = f'{type(error).__name__}; {error}' if isinstance(error, LoginRequestRejected) else type(error).__name__
+        alert(state, account, f'Failure while {phase} ({detail})',
+              page if authenticated or isinstance(error, LoginRequestRejected) else None)
     finally:
         context.close()
 

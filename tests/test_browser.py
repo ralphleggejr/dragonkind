@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -83,7 +83,7 @@ class BrowserFlow(unittest.TestCase):
                     'MFA_AUTO_SUBMIT': 'true' if auto_submit else 'false', 'AUTH_READY_SELECTOR': 'a.button[href="/archway"]' if forms else '.choice >> nth=0',
                     'CHOICES_SELECTOR': ('a.button[href="/archway"], button.button[type="submit"]:has-text("Brave Threshing"), button[data-page-next], label[for^="choice-"]' if forms else '.choice'), 'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form=choices]', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
-        settings.update(DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
+        settings.update(EMAIL_SUBMIT_DELAY_SECONDS='0', LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
                         DEATH_NARRATIVE_SELECTOR='', COOLDOWN_SELECTOR='')
         if logout_flow:
             settings.update(DEATH_CONTINUE_SELECTOR='button.onward[data-page-next]',
@@ -285,5 +285,40 @@ class BrowserFlow(unittest.TestCase):
                 configure_page(page)
                 wait_story_ready(page)
                 self.assertTrue(page.locator('#choice').is_visible())
+        finally:
+            context.close()
+
+    def test_exact_uppercase_email_committed_and_waited_before_submission(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content("""<form><input id="email" name="reader" oninput="window.inputAt=performance.now()" onchange="window.committed=this.value"><button type="button" onclick="window.sent={email:new FormData(this.form).get('reader'),elapsed:performance.now()-window.inputAt}">Send me a code</button></form>""")
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_EMAIL_CASE': 'upper',
+                                        'EMAIL_SUBMIT_DELAY_SECONDS': '1'}):
+                self.assertEqual(fill_login_email(page, 'leggejr.co@gmail.com'), 'LEGGEJR.CO@GMAIL.COM')
+                page.locator('button').click()
+                sent = page.evaluate('window.sent')
+                self.assertEqual(sent['email'], 'LEGGEJR.CO@GMAIL.COM')
+                self.assertGreaterEqual(sent['elapsed'], 1000)
+                self.assertEqual(page.evaluate('window.committed'), 'LEGGEJR.CO@GMAIL.COM')
+        finally:
+            context.close()
+
+    def test_native_login_rejection_is_reported_without_waiting_for_mfa(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            context.route('https://example.test/**', lambda route: route.fulfill(
+                status=422 if route.request.method == 'POST' else 200,
+                content_type='text/html; charset=utf-8',
+                body='<h1>Say again?</h1>' if route.request.method == 'POST' else
+                     '<form action="/enter" method="post"><input id="email" name="reader"><button id="send">Send me a code</button></form>'))
+            page.goto('https://example.test/')
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'EMAIL_SUBMIT_SELECTOR': '#send',
+                                        'LOGIN_EMAIL_CASE': 'upper', 'EMAIL_SUBMIT_DELAY_SECONDS': '0'}):
+                fill_login_email(page, 'leggejr.co@gmail.com')
+                with self.assertRaisesRegex(LoginRequestRejected, 'HTTP 422'):
+                    submit_login_code_request(page)
+                self.assertEqual(page.locator('h1').inner_text(), 'Say again?')
         finally:
             context.close()
