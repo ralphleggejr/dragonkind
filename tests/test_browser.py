@@ -28,8 +28,12 @@ class BrowserFlow(unittest.TestCase):
         cls.browser.close()
         cls.driver.stop()
 
-    def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2):
+    def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2, red_dragon=False):
         rows = [[options[0], 'Other choice'] for options in ROUTE['steps']]
+        if red_dragon:
+            rows[6] = ['Run away', 'Attack', 'Lower your eyes in respect']
+        if forms:
+            rows[ROUTE['shadow_checkpoint']][0] = 'Descend quickly in preparation for whatever’s coming your way'
         if mismatch:
             rows[0] = ['Unrecognized choice']
         if shadow:
@@ -202,3 +206,8 @@ class BrowserFlow(unittest.TestCase):
             self.assertEqual(page.locator('body').inner_text(), 'Continue')
         finally:
             context.close()
+
+    def test_red_dragon_branch_rejoins_forest_route(self):
+        state, emails = self.exercise(auto_submit=True, forms=True, logout_flow=True, red_dragon=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(emails, 0)

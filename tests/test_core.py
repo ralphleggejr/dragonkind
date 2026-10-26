@@ -16,10 +16,19 @@ class Decisions(unittest.TestCase):
             choose(['Continue into danger'], ['continue'])
 
     def test_branch_and_typography(self):
-        self.assertEqual(choose(['Lower eyes in respect'],
-                                ['Lower your eyes and hold still', 'Lower eyes in respect']), 0)
+        self.assertEqual(choose(['Lower your eyes in respect'],
+                                ['Lower your eyes and hold still', 'Lower your eyes in respect']), 0)
         self.assertEqual(choose(['Jump now and you can land on it’s back.'],
                                 ["jump now and you can land on it's back"]), 0)
+
+    def test_confirmed_dragon_branches_and_tree_label(self):
+        route = json.loads(Path('route.json').read_text())
+        branches = route['steps'][6]
+        for label in ('Lower your eyes and hold still', 'Lower your eyes in respect'):
+            self.assertEqual(choose(['Run away', 'Attack', label], branches), 2)
+        self.assertEqual(route['steps'][7], ['Head deeper into the forest'])
+        self.assertEqual(choose(['Wait', 'Descend quickly in preparation for whatever’s coming your way'],
+                                route['steps'][route['shadow_checkpoint']]), 1)
 
     def test_shadow_in_any_option(self):
         self.assertTrue(shadow(['a', 'b', 'A shadow moves']))
