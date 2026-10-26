@@ -3,7 +3,8 @@ import json
 import os
 import time
 from pathlib import Path
-from .core import choose, load_state, save_state, shadow
+from urllib.parse import urlsplit
+from .core import choose, load_state, save_state, shadow, login_request_summary
 from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
@@ -315,15 +316,62 @@ def run():
             browser.close()
 
 
+def inspect_login_submission(page, account):
+    captured = []
+    def intercept(route):
+        request = route.request
+        if request.method not in ('GET', 'HEAD'):
+            if request.method == 'POST' and urlsplit(request.url).path == '/enter':
+                captured.append(login_request_summary(request.post_data, request.all_headers(), account))
+            route.abort()  # Block all mutations, including the login-code request.
+        else:
+            route.fallback()
+    page.context.route('**/*', intercept)
+    try:
+        page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+        prepare_login(page)
+        fill_login_email(page, account)
+        try:
+            submit_login_code_request(page)
+        except Exception:
+            if not captured:
+                raise
+        if len(captured) != 1:
+            raise RuntimeError('Expected exactly one intercepted login request')
+        return captured[0]
+    finally:
+        page.context.unroute('**/*', intercept)
+
+
+def diagnose_login(account):
+    from playwright.sync_api import sync_playwright
+    print('Dry run: login submission is intercepted; no verification email will be requested.', flush=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
+        context = browser.new_context(service_workers='block')
+        try:
+            page = context.new_page()
+            configure_page(page)
+            summary = inspect_login_submission(page, account)
+            print(json.dumps(summary, indent=2), flush=True)
+        finally:
+            context.close()
+            browser.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['run', 'check', 'reset'])
+    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login'])
     parser.add_argument('--account')
     parser.add_argument('--confirm-site-reset', action='store_true')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
         print('Required settings present. Live selectors, email access and site flow remain unverified.')
+    elif args.command == 'diagnose-login':
+        if not args.account:
+            parser.error('diagnose-login requires --account')
+        diagnose_login(args.account)
     elif args.command == 'reset':
         route = json.loads(Path('route.json').read_text())
         if args.account not in route['accounts'] or not args.confirm_site_reset:

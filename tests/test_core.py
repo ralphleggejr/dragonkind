@@ -4,7 +4,7 @@ import unittest
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow
+from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary
 
 
 class Decisions(unittest.TestCase):
@@ -82,6 +82,16 @@ class Decisions(unittest.TestCase):
                      'Your confirmation code is AB-1234.', 'Your confirmation code is ABC-123-X.'):
             msg = self.message('From: hello@dragonkind.com\nTo: one@gmail.com\n' + body)
             self.assertIsNone(extract_code(msg, 'one@gmail.com', 'hello@dragonkind.com', DEFAULT_CODE_REGEX))
+
+    def test_login_request_diagnostics_never_expose_token_or_cookie_values(self):
+        result = login_request_summary('reader=leggejr.co%40gmail.com&_csrf_token=SECRET_TOKEN&other=SECRET_OTHER',
+                                       {'Cookie': 'session=SECRET_COOKIE', 'Origin': 'https://dragonkind.com',
+                                        'Referer': 'https://dragonkind.com'}, 'leggejr.co@gmail.com')
+        self.assertEqual(result['reader_values'], ['leggejr.co@gmail.com'])
+        self.assertTrue(result['reader_matches_account_exactly'])
+        self.assertTrue(result['csrf_field_nonempty'])
+        self.assertTrue(result['cookie_header_present'])
+        self.assertNotIn('SECRET', json.dumps(result))
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())

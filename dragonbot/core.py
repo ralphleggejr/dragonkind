@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs
 
 
 DEFAULT_CODE_REGEX = r"(?i:your confirmation code is)\s+([0-9A-Za-z]{3}-?[0-9A-Za-z]{3})(?![0-9A-Za-z-])"
@@ -62,3 +63,23 @@ def extract_code(message, account, sender, pattern):
         if isinstance(code, str):
             return code
     return None
+
+
+def login_request_summary(body, headers, expected_account):
+    fields = parse_qs(body or '', keep_blank_values=True)
+    readers = fields.get('reader', [])
+    # Only the email field is allowed to expose a value; never print token/cookie values.
+    safe_readers = [value if re.fullmatch(r'[^@\s]+@[^@\s]+', value)
+                    else '[not an email-shaped value]' for value in readers]
+    headers = {name.lower(): value for name, value in headers.items()}
+    return {
+        'reader_values': safe_readers,
+        'reader_matches_account_exactly': readers == [expected_account],
+        'reader_matches_account_ignoring_case': len(readers) == 1 and readers[0].casefold() == expected_account.casefold(),
+        'field_names': sorted(fields),
+        'csrf_field_present': '_csrf_token' in fields,
+        'csrf_field_nonempty': bool(fields.get('_csrf_token', [''])[0]),
+        'cookie_header_present': bool(headers.get('cookie')),
+        'origin_header_present': bool(headers.get('origin')),
+        'referer_header_present': bool(headers.get('referer')),
+    }

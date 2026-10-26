@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -350,5 +350,28 @@ class BrowserFlow(unittest.TestCase):
                 self.assertEqual(page.evaluate('window.clicks'), 1)
                 self.assertEqual(page.evaluate('window.submitted'), 'LEGGEJR.CO@GMAIL.COM')
                 self.assertGreaterEqual(page.evaluate('window.keyCountAtClick'), len('LEGGEJR.CO@GMAIL.COM'))
+        finally:
+            context.close()
+
+    def test_login_dry_run_captures_exact_payload_without_reaching_submission_endpoint(self):
+        context = self.browser.new_context()
+        reached_posts = []
+        def server(route):
+            if route.request.method == 'POST':
+                reached_posts.append(route.request.url)
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<form action="/enter" method="post"><input type="hidden" name="_csrf_token" value="SECRET"><input id="email" name="reader"><button id="send">Send me a code</button></form>')
+        context.route('https://dragonkind.com/**', server)
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_ENTRY_SELECTOR': '',
+                                        'EMAIL_SUBMIT_SELECTOR': '#send', 'EMAIL_TYPING_DELAY_MS': '0',
+                                        'LOGIN_EMAIL_CASE': 'original'}):
+                summary = inspect_login_submission(page, 'leggejr.co@gmail.com')
+            self.assertTrue(summary['reader_matches_account_exactly'])
+            self.assertTrue(summary['csrf_field_nonempty'])
+            self.assertEqual(reached_posts, [])
+            self.assertNotIn('SECRET', json.dumps(summary))
         finally:
             context.close()

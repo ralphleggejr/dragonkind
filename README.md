@@ -186,3 +186,11 @@ py -3 -m venv .venv
 ```
 
 The tests can also use an existing `chromium` executable on PATH or the browser at `TEST_CHROMIUM_PATH`. Use the existing checkout; a separate Git worktree is unnecessary.
+
+## Diagnose a rejected login without sending another code
+
+```sh
+docker compose run --rm dragonbot python -m dragonbot diagnose-login --account leggejr.co@gmail.com
+```
+
+This opens the public login page, uses the same email typing and arrow-click functions as the runner, and intercepts the outgoing `/enter` POST before it reaches the server. All non-GET/HEAD requests are blocked during the diagnostic, and service workers are disabled so they cannot bypass that interception. No verification email is requested, game choices are not made, and saved pauses/cooldowns are untouched. Output includes the actual submitted `reader` email, form-field names, and booleans for cookie/CSRF/header presence. Token values, cookie values, other form values, and credentials are excluded. Compare the email and field names with a successful manual-browser submission. This does not reproduce a server response because the POST is deliberately blocked.
