@@ -1,0 +1,9 @@
+services:
+  dragonbot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./route.json:/app/route.json:ro
+    restart: "no"
+    init: true
