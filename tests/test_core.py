@@ -6,7 +6,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 from unittest.mock import patch
-from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary, refresh_global_pause
+from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections
 
 
 class Decisions(unittest.TestCase):
@@ -197,6 +197,51 @@ class Decisions(unittest.TestCase):
             self.assertFalse(replay_login('ralphleggejr@gmail.com'))
             context.close.assert_called_once()
             browser.close.assert_called_once()
+
+    def test_eight_accounts_are_exactly_the_requested_addresses(self):
+        accounts = json.loads(Path('route.json').read_text())['accounts']
+        self.assertEqual(accounts, ['ralphleggejr@gmail.com', 'ralphleggejr.apple@gmail.com',
+            'leggetechsolutions@gmail.com', 'leggefamilyco@gmail.com', 'rljr.code@gmail.com',
+            'rlegge.code@gmail.com', 'leggejr.co@gmail.com', '10249southlawncir@gmail.com'])
+
+    def test_retry_login_errors_keeps_cooldowns_and_other_pauses(self):
+        state = {'accounts': {
+            'rejected@gmail.com': {'status': 'paused', 'step': 0, 'next_run': 9000,
+                'reason': 'Failure while submitting the login email (LoginRequestRejected; HTTP 422)'},
+            'shadow@gmail.com': {'status': 'paused', 'step': 18, 'reason': 'shadow', 'pause_scope': 'account'},
+            'unknown@gmail.com': {'status': 'paused', 'step': 0, 'reason': 'TimeoutError', 'pause_scope': 'global'}},
+            'global_pause': True}
+        accounts = list(state['accounts'])
+        self.assertEqual(retry_login_rejections(state, accounts), ['rejected@gmail.com'])
+        self.assertEqual(state['accounts']['rejected@gmail.com']['next_run'], 9000)
+        self.assertEqual(state['accounts']['rejected@gmail.com']['status'], 'pending')
+        self.assertEqual(state['accounts']['shadow@gmail.com']['status'], 'paused')
+        self.assertTrue(state['global_pause'])
+
+    def test_desktop_scheduler_visits_all_eight_and_skips_individual_cooldowns(self):
+        from dragonbot.__main__ import run
+        from unittest.mock import MagicMock
+        route = json.loads(Path('route.json').read_text())
+        accounts = route['accounts']
+        state = {'accounts': {accounts[0]: {'status': 'cooldown', 'next_run': 2000},
+                              accounts[1]: {'status': 'paused', 'pause_scope': 'account'}}, 'global_pause': False}
+        played = []
+        def attempt(engine, plan, saved, account, headless):
+            self.assertFalse(headless)
+            played.append(account)
+            saved['accounts'][account] = {'status': 'cooldown', 'next_run': 15400}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('dragonbot.__main__.configuration', return_value=route), \
+                 patch('dragonbot.__main__.load_state', return_value=state), \
+                 patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
+                 patch('playwright.sync_api.sync_playwright', return_value=MagicMock()), \
+                 patch('dragonbot.__main__.time.time', return_value=1000), \
+                 patch('dragonbot.__main__.time.sleep', side_effect=StopIteration), \
+                 patch('dragonbot.__main__.run_account', side_effect=attempt):
+                with self.assertRaises(StopIteration):
+                    run(headless=False)
+        self.assertEqual(played, accounts[2:])
+        self.assertEqual(state['accounts'][accounts[0]]['next_run'], 2000)
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())

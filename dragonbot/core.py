@@ -96,3 +96,21 @@ def refresh_global_pause(state, configured_accounts):
         and state['accounts'][account].get('pause_scope') == 'global'
         for account in configured_accounts
     )
+
+
+def retry_login_rejections(state, configured_accounts):
+    refresh_global_pause(state, configured_accounts)
+    retried = []
+    for account in configured_accounts:
+        record = state['accounts'].get(account, {})
+        reason = record.get('reason', '')
+        if (record.get('status') == 'paused' and record.get('step') == 0
+                and 'LoginRequestRejected' in reason and 'HTTP 422' in reason):
+            record['previous_login_rejection'] = reason
+            record['status'] = 'pending'
+            record['notification_pending'] = False
+            record.pop('reason', None)
+            record.pop('pause_scope', None)
+            retried.append(account)
+    refresh_global_pause(state, configured_accounts)
+    return retried

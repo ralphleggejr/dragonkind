@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -566,5 +566,25 @@ class BrowserFlow(unittest.TestCase):
                 self.assertEqual(confirm_login(page, allow_existing_session=True), 'in_progress')
                 self.assertEqual(page.url, 'https://dragonkind.com/play')
                 self.assertFalse(page.locator('#choice-0').is_checked())
+        finally:
+            context.close()
+
+    def test_account_with_site_cooldown_is_saved_signed_out_and_skipped(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            page.set_content("""<section class="cooldown"><p id="cooldown-label">You can brave Threshing again in</p><time data-countdown datetime="1970-01-01T01:00:00+00:00">1:00</time></section><button popovertarget="profile">Profile</button><div id="profile" popover><button id="signout" onclick="document.body.innerHTML='&lt;label for=email&gt;Email Address&lt;/label&gt;&lt;input id=email&gt;'">Sign out</button></div>""")
+            state = {'accounts': {'one@gmail.com': {'status': 'active', 'next_run': 0}}, 'global_pause': False}
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'PROFILE_SELECTOR': 'button[popovertarget=profile]',
+                                        'SIGN_OUT_SELECTOR': '#signout', 'LOGIN_ENTRY_SELECTOR': '',
+                                        'COOLDOWN_SELECTOR': '#cooldown-label'}), \
+                 patch('dragonbot.__main__.time.time', return_value=1000), \
+                 patch('dragonbot.__main__.save_state'):
+                self.assertFalse(account_ready_for_story(page, {'cooldown_seconds': 14400}, state, 'one@gmail.com', 'cooldown'))
+                self.assertEqual(state['accounts']['one@gmail.com']['next_run'], 3600)
+                self.assertEqual(state['accounts']['one@gmail.com']['status'], 'cooldown')
+                self.assertFalse(state['global_pause'])
+                self.assertTrue(page.get_by_role('textbox', name='Email Address').is_visible())
         finally:
             context.close()

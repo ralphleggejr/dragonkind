@@ -13,7 +13,7 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 
 ## Before you start
 
-This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Automatic MFA retrieval, the full game route, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA retrieval and entry have now succeeded for one account. The full game route, eight-account rotation, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
 
 Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. All commands below assume your project folder is named `dragonkind` in Downloads; change the path to match your copy.
 
@@ -247,3 +247,25 @@ bash scripts/test-login-mac.sh ralphleggejr@gmail.com
 This launcher installs native Playwright and python-dotenv in `.venv`, opens visible Chromium, and reads mail settings from the local `.env` without overriding existing exported values. It establishes a fresh inbox UID boundary, requests one login code, waits for the matching forwarded email, and fills MFA automatically. Leave the browser untouched during this test; do not enter the code or click Brave Threshing yourself. The browser closes after authenticated UI is confirmed. A cooldown label or an already-started game can also confirm authentication, without starting/restarting the story. It does not modify pause/cooldown state, persist browser storage, record codes, or make game choices. Native Mac success does not establish Docker readiness.
 
 The manual replay now reports user-closed windows as a cancelled test instead of a TargetClosedError traceback. Navigation to the recorded Rotunda URL happens only when the code field has disappeared and the browser has not already reached Rotunda, Archway, or Play; authenticated UI markers are still required. If you manually click through while replay is waiting, it can recognize authenticated game UI, but it never clicks those story controls itself.
+
+## Run all eight accounts in the verified Mac browser mode
+
+`route.json` lists these eight addresses in rotation order: `ralphleggejr@gmail.com`, `ralphleggejr.apple@gmail.com`, `leggetechsolutions@gmail.com`, `leggefamilyco@gmail.com`, `rljr.code@gmail.com`, `rlegge.code@gmail.com`, `leggejr.co@gmail.com`, and `10249southlawncir@gmail.com`.
+
+If your local `route.json` still has the single-account test configuration, preserve that edit in a Git stash before pulling the new eight-account file. Keep the stash; do not pop it over the new configuration:
+
+```bash
+cd "$HOME/Downloads/dragonkind-git"
+docker compose down
+git stash push -m "Preserve single-account test configuration" -- route.json
+git pull --ff-only
+bash scripts/run-mac.sh --retry-login-errors
+```
+
+The launcher reads your local `.env` and runs the full scheduler with native **visible Chromium**, matching the login/MFA test that succeeded on your Mac. It uses recorded login actions and the configured email's original case. It runs one account at a time, obtains each account's MFA from the `rljr.code@gmail.com` inbox, follows the route, and closes Chromium completely after each account run and before a rejected-login retry. Keep forwarding enabled for the other seven accounts; the inbox account receives its own codes directly. Keep the Mac awake and leave automation browser windows untouched. Stop the scheduler with Control+C. Do not run Docker or a second native scheduler at the same time.
+
+`--retry-login-errors` only releases saved step-0 pauses explicitly identified as HTTP 422 `LoginRequestRejected` failures from the old login flow. It retains the reason as history and preserves all cooldown deadlines. Shadow pauses, unknown timeouts, and game-stage failures are not cleared. Omit the flag on later launches if no such retries are needed. Do not delete `data/state.json`.
+
+If a logged-in account already shows a site cooldown, the runner signs out, saves that account's advertised `data-countdown`/`datetime` deadline when available (otherwise a conservative four-hour delay), and moves on. An already-started game is paused for that account's review rather than guessing a route position. Confirmed bot deaths retain their separate four-hour cooldowns. The shadow checkpoint pauses only that account by default; other unexpected failures still pause the scheduler for review.
+
+Native automatic login is verified for one account. The full story route, all eight accounts, and unattended operation still need live validation; watch the first rotation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.

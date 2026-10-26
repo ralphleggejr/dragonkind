@@ -2,9 +2,10 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
-from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause
+from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections
 from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
@@ -270,6 +271,57 @@ def finish_known_death_pages(page):
     raise RuntimeError('Known death narrative did not reach a result screen')
 
 
+def site_cooldown_deadline(page, fallback_seconds):
+    label = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label').filter(visible=True).first
+    timestamp = label.evaluate("""(element) => {
+        const container = element.closest('.cooldown') || element.closest('section') || element.parentElement;
+        return container.querySelector('[data-countdown][datetime]')?.getAttribute('datetime') || null;
+    }""")
+    now = time.time()
+    if timestamp:
+        try:
+            deadline = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            if deadline.tzinfo is not None:
+                return max(now + 60, deadline.timestamp())
+        except ValueError:
+            pass
+    # Preserve the four-hour rule when the site exposes no readable deadline.
+    return now + fallback_seconds
+
+
+def logout_from_profile(page):
+    if os.environ.get('PROFILE_SELECTOR'):
+        visible(page, 'PROFILE_SELECTOR').click()
+    sign_out = page.locator(os.environ['SIGN_OUT_SELECTOR']).filter(visible=True)
+    sign_out.wait_for(state='visible')
+    sign_out.click()
+    prepare_login(page)
+
+
+def account_ready_for_story(page, route, state, account, login_status):
+    if os.environ.get('LOGIN_FLOW', 'recorded') != 'recorded':
+        return True
+    ready = login_locator(page, 'AUTH_READY_SELECTOR')
+    cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
+    # Profile can appear before the animated ready/cooldown panel; wait for that panel.
+    if login_status == 'authenticated':
+        ready.or_(cooldown).filter(visible=True).first.wait_for(state='visible')
+    if cooldown.is_visible():
+        record = state['accounts'][account]
+        record.update(status='cooldown', next_run=max(record.get('next_run', 0),
+                      site_cooldown_deadline(page, route['cooldown_seconds'])), step=0)
+        save_state(STATE, state)
+        logout_from_profile(page)
+        print(f'{account} is already cooling down; moving to the next account.', flush=True)
+        return False
+    if login_status == 'in_progress':
+        alert(state, account, 'Account already has a game in progress; review before restarting its route.',
+              page, global_pause=False)
+        return False
+    ready.wait_for(state='visible')
+    return True
+
+
 def logout_after_death(page):
     # This function must never use the ordinary Continue button as proof of death.
     if not visible(page, 'DEATH_SELECTOR').count():
@@ -279,12 +331,7 @@ def logout_after_death(page):
             click_transition(page, visible(page, name))
     if os.environ.get('COOLDOWN_SELECTOR'):
         page.locator(os.environ['COOLDOWN_SELECTOR']).wait_for(state='visible')
-    if os.environ.get('PROFILE_SELECTOR'):
-        visible(page, 'PROFILE_SELECTOR').click()
-    sign_out = page.locator(os.environ['SIGN_OUT_SELECTOR']).filter(visible=True)
-    sign_out.wait_for(state='visible')
-    sign_out.click()
-    prepare_login(page)
+    logout_from_profile(page)
 
 
 def alert(state, account, reason, page=None, global_pause=True):
@@ -346,8 +393,10 @@ def play(browser, route, state, account, restart_browser=None):
             phase = 'waiting for the verification email'
             code = wait_code(client, boundary, account)
         phase = 'completing login'
-        complete_mfa(page, code)
+        login_status = complete_mfa(page, code, allow_existing_session=True)
         authenticated = True
+        if not account_ready_for_story(page, route, state, account, login_status):
+            return
         phase = 'following the story route'
         for index, options in enumerate(route['steps']):
             record['step'] = index
@@ -382,7 +431,7 @@ def play(browser, route, state, account, restart_browser=None):
         context.close()
 
 
-def run_account(playwright, route, state, account):
+def run_account(playwright, route, state, account, headless=True):
     browser = None
     def launch_fresh_browser():
         nonlocal browser
@@ -390,7 +439,7 @@ def run_account(playwright, route, state, account):
             browser.close()
             browser = None
             print('Previous browser fully closed.', flush=True)
-        browser = playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
+        browser = playwright.chromium.launch(headless=headless, args=['--disable-dev-shm-usage'])
         return browser
     try:
         play(launch_fresh_browser(), route, state, account, restart_browser=launch_fresh_browser)
@@ -400,12 +449,15 @@ def run_account(playwright, route, state, account):
             print(f'Browser fully closed for {account}.', flush=True)
 
 
-def run():
+def run(headless=True, retry_rejected=False):
     from playwright.sync_api import sync_playwright
     route = configuration()
     state = load_state(STATE)
     active_accounts = route['accounts']
     refresh_global_pause(state, active_accounts)
+    if retry_rejected:
+        retried = retry_login_rejections(state, active_accounts)
+        print('Retrying only previous pre-MFA HTTP 422 failures: ' + (', '.join(retried) or 'none'), flush=True)
     save_state(STATE, state)
     print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
     for account, record in state['accounts'].items():
@@ -427,7 +479,7 @@ def run():
                 record = state['accounts'].get(account, {})
                 if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
                     continue
-                run_account(playwright, route, state, account)
+                run_account(playwright, route, state, account, headless=headless)
                 if state['global_pause']:
                     break
             if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
@@ -549,13 +601,20 @@ def replay_login(account, automatic=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login', 'replay-login', 'desktop-login'])
+    parser.add_argument('command', choices=['run', 'check', 'reset', 'diagnose-login', 'replay-login', 'desktop-login', 'run-desktop'])
     parser.add_argument('--account')
     parser.add_argument('--confirm-site-reset', action='store_true')
+    parser.add_argument('--retry-login-errors', action='store_true', help='Retry only saved pre-MFA HTTP 422 rejections; retain cooldowns and other pauses.')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
         print('Required settings present. Live selectors, email access and site flow remain unverified.')
+    elif args.command == 'run-desktop':
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=Path('.env'), override=False)
+        os.environ['LOGIN_FLOW'] = 'recorded'
+        os.environ['LOGIN_EMAIL_CASE'] = 'original'
+        run(headless=False, retry_rejected=args.retry_login_errors)
     elif args.command in ('replay-login', 'desktop-login'):
         if not args.account:
             parser.error(f'{args.command} requires --account')
@@ -576,7 +635,7 @@ def main():
         refresh_global_pause(state, route['accounts'])
         save_state(STATE, state)
     else:
-        run()
+        run(retry_rejected=args.retry_login_errors)
 
 
 if __name__ == '__main__':
