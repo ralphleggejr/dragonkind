@@ -16,6 +16,8 @@ def configuration():
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise RuntimeError('Missing configuration: ' + ', '.join(missing))
+    if os.environ.get('DEATH_NARRATIVE_SELECTOR') and not os.environ.get('DEATH_PAGE_NEXT_SELECTOR'):
+        raise RuntimeError('DEATH_PAGE_NEXT_SELECTOR is required for death narrative navigation')
     auto = os.environ.get('MFA_AUTO_SUBMIT', 'true').lower()
     if auto not in ('true', 'false'):
         raise RuntimeError('MFA_AUTO_SUBMIT must be true or false')
@@ -86,6 +88,24 @@ def complete_mfa(page, code):
     field.wait_for(state='hidden')
 
 
+def finish_known_death_pages(page):
+    # Narrative pages are a route to confirmation, not themselves proof of death.
+    for step in range(3):
+        if visible(page, 'DEATH_SELECTOR').count():
+            return True
+        narrative_selector = os.environ.get('DEATH_NARRATIVE_SELECTOR')
+        if not narrative_selector or not page.locator(narrative_selector).filter(visible=True).count():
+            if step:
+                raise RuntimeError('Unrecognized page during death confirmation')
+            return False
+        onward = visible(page, 'DEATH_PAGE_NEXT_SELECTOR')
+        onward.first.wait_for(state='visible')
+        if onward.count() != 1:
+            raise RuntimeError('Expected one Continue on a known death narrative page')
+        click_transition(page, onward)
+    raise RuntimeError('Known death narrative did not reach a result screen')
+
+
 def logout_after_death(page):
     # This function must never use the ordinary Continue button as proof of death.
     if not visible(page, 'DEATH_SELECTOR').count():
@@ -93,6 +113,8 @@ def logout_after_death(page):
     for name in ('DEATH_CONTINUE_SELECTOR', 'ROTUNDA_SELECTOR'):
         if os.environ.get(name):
             click_transition(page, visible(page, name))
+    if os.environ.get('COOLDOWN_SELECTOR'):
+        page.locator(os.environ['COOLDOWN_SELECTOR']).wait_for(state='visible')
     if os.environ.get('PROFILE_SELECTOR'):
         visible(page, 'PROFILE_SELECTOR').click()
     sign_out = page.locator(os.environ['SIGN_OUT_SELECTOR']).filter(visible=True)
@@ -145,7 +167,7 @@ def play(browser, route, state, account):
         for index, options in enumerate(route['steps']):
             record['step'] = index
             save_state(STATE, state)
-            if visible(page, 'DEATH_SELECTOR').count():
+            if finish_known_death_pages(page):
                 break
             labels = visible(page, 'CHOICES_SELECTOR').all_inner_texts()
             if index == route['shadow_checkpoint'] and shadow(labels):
@@ -154,7 +176,7 @@ def play(browser, route, state, account):
                 return
             selection = choose(labels, options, allow_contains=index == len(route['steps']) - 1)
             execute_choice(page, visible(page, 'CHOICES_SELECTOR').nth(selection))
-        if not visible(page, 'DEATH_SELECTOR').count():
+        if not finish_known_death_pages(page):
             raise RuntimeError('Route ended without a confirmed death screen')
         # Start cooldown on confirmation, even if logout subsequently fails.
         record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')

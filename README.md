@@ -8,12 +8,12 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 - Only new inbox messages received after the request boundary are considered. Match the intended account, original sender, and one unique code. Inbox messages are read without marking them read or deleting them. Codes and credentials are not deliberately logged or persisted.
 - Follow `route.json`. A radio choice plus its “Next Scene” submission is one route step; Continue and Brave Threshing controls are separate steps. Text matching ignores case, spacing, curly apostrophes, and final punctuation. All choices require a unique exact match except the final “Hope for the best” phrase. Review the route against the site's real labels, especially “it's back.”
 - At the configured checkpoint, pause that account if any visible choice label mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
-- After a confirmed death, set that account's four-hour cooldown, click Continue → Rotunda → Profile → Sign out, and verify the email login form, and continue the next eligible account. Cooldowns and pauses survive container restarts in `data/state.json`.
+- Follow the supplied death narrative Continue pages to the terminal retry result. Only then start that account's four-hour cooldown, open the result's Rotunda link, verify `#cooldown-label`, and click Profile → Sign out. Confirm the email login form before continuing with the next eligible account. Cooldowns and pauses survive container restarts in `data/state.json`.
 - Unexpected pages, ambiguous choices, timeouts, mail failures, or interrupted active runs pause the entire runner for review. It never solves CAPTCHAs or bypasses MFA. A failed notification leaves a persistent pending flag for retry on restart.
 
 ## Before you start
 
-This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, but the Docker image build, real Gmail access, and actual website flow have not been verified. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Real Gmail access and the actual website flow have not been verified. You must supply the website selectors and verification sender below before starting real account attempts.
 
 Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. All commands below assume your project folder is named `dragonkind` in Downloads; change the path to match your copy.
 
@@ -78,14 +78,17 @@ Required live-site configuration:
 | `AUTH_READY_SELECTOR` | Post-login marker: `a.button[href="/archway"]` (“Brave Threshing”); waited for, not clicked during authentication |
 | `CHOICES_SELECTOR` | Supplied Brave Threshing links/buttons, `button[data-page-next]`, and `label[for^="choice-"]`, in document order; hidden controls are excluded |
 | `CHOICE_SUBMIT_SELECTOR` | `button[data-choices-submit][form="choices"]`; used only after selecting a labeled radio option |
-| `DEATH_SELECTOR` | Element unique to the confirmed death screen |
-| `DEATH_CONTINUE_SELECTOR` | After confirmed death only: `button.onward[data-page-next]` |
-| `ROTUNDA_SELECTOR` | `a.icon-button[href="/rotunda"]` after the death Continue |
+| `DEATH_SELECTOR` | Terminal result span containing the supplied “Reconsider your risk-to-reward ratios … come back in a few hours.” message; see `.env.example` |
+| `DEATH_NARRATIVE_SELECTOR` | Supplied “Sometimes they don’t.” / “snapping your neck” narrative markers; these allow bounded Continue clicks but do not start cooldown |
+| `DEATH_PAGE_NEXT_SELECTOR` | `button.onward[data-page-next]` on a recognized death narrative page only |
+| `DEATH_CONTINUE_SELECTOR` | Leave blank for the supplied result page, which links directly to Rotunda |
+| `ROTUNDA_SELECTOR` | `a.onward[href="/rotunda"]`, the final result’s Continue link; excludes the header navigation icon |
+| `COOLDOWN_SELECTOR` | `#cooldown-label`, verified after entering Rotunda and before signing out |
 | `PROFILE_SELECTOR` | `button[popovertarget="profile"]` opens the profile popover |
 | `SIGN_OUT_SELECTOR` | `button.text-link[type="submit"]:text-is("Sign out")` in the visible profile popover |
 | `MFA_ORIGINAL_SENDER` | Confirmed sender: `hello@dragonkind.com` |
 
-`MFA_SELECTOR` is confirmed as `#next-code`. Code entry automatically advances to the page containing “Brave Threshing.” Set `MFA_AUTO_SUBMIT=true` and `AUTH_READY_SELECTOR=a.button[href="/archway"]`; leave `MFA_SUBMIT_SELECTOR` blank. Selectors for the supplied story controls are now included in `.env.example`. Each labeled option is selected and its linked radio input verified before clicking “Next Scene.” The post-death controls supplied by the user are now included: Continue, Rotunda, Profile, Sign out. A unique death-screen selector and later story label wording still need verification. Continue alone does not establish death. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
+`MFA_SELECTOR` is confirmed as `#next-code`. Code entry automatically advances to the page containing “Brave Threshing.” Set `MFA_AUTO_SUBMIT=true` and `AUTH_READY_SELECTOR=a.button[href="/archway"]`; leave `MFA_SUBMIT_SELECTOR` blank. Selectors for the supplied story controls are now included in `.env.example`. Each labeled option is selected and its linked radio input verified before clicking “Next Scene.” The post-death controls supplied by the user are now included: Continue, Rotunda, Profile, Sign out. The supplied terminal retry message now identifies the result, and `#cooldown-label` confirms the site cooldown after entering Rotunda. Death prose can vary; only the supplied narrative markers are automatically advanced. Other unrecognized endings pause for review. No live attempt has yet verified these selectors together. Existing `.env` files are not automatically updated from `.env.example`; copy the changed settings manually while preserving your password.
 
 Selectors accept Playwright syntax, including CSS and `text=...`. Inspect the actual site in browser developer tools. Do not invent selectors or use a broad `button` selector. A password step, iframe, custom code widget, differently structured story branches, or a logout confirmation may require adapting this prototype after live inspection.
 
