@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -375,3 +375,69 @@ class BrowserFlow(unittest.TestCase):
             self.assertNotIn('SECRET', json.dumps(summary))
         finally:
             context.close()
+
+    def test_login_waits_for_transparent_control_and_ancestor_to_be_painted(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            page.set_content("""<div id="panel" style="opacity:0"><input id="email" oninput="window.typedAt=performance.now()"></div><script>setTimeout(()=>{document.querySelector('#panel').style.opacity='1';window.revealedAt=performance.now()},200)</script>""")
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'EMAIL_TYPING_DELAY_MS': '0'}):
+                fill_login_email(page, 'leggejr.co@gmail.com')
+            self.assertGreaterEqual(page.evaluate('window.typedAt'), page.evaluate('window.revealedAt'))
+        finally:
+            context.close()
+
+    def exercise_login_retry(self, statuses):
+        context = self.browser.new_context()
+        roots, posts, csrf_values = [], [], []
+        def server(route):
+            path = __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(route.request.url).path
+            if route.request.method == 'POST':
+                posts.append(route.request.url)
+                fields = __import__('urllib.parse', fromlist=['parse_qs']).parse_qs(route.request.post_data)
+                csrf_values.append(fields['_csrf_token'][0])
+                status = statuses[min(len(posts)-1, len(statuses)-1)]
+                route.fulfill(status=status, content_type='text/html', body='<h1>Rejected</h1>' if status >= 400 else '<input id="code">')
+            else:
+                roots.append(path)
+                route.fulfill(content_type='text/html', body=f'<form action="/enter" method="post"><input type="hidden" name="_csrf_token" value="token-{len(roots)}"><input id="email" name="reader"><button id="send">Send me a code</button></form>')
+        context.route('https://dragonkind.com/**', server)
+        try:
+            page = context.new_page()
+            page.set_default_timeout(2000)
+            page.goto('https://dragonkind.com')
+            callback = MagicMock(side_effect=[10, 20])
+            failure = None
+            boundary = None
+            with patch.dict(os.environ, {'EMAIL_SELECTOR': '#email', 'LOGIN_ENTRY_SELECTOR': '',
+                                        'EMAIL_SUBMIT_SELECTOR': '#send', 'EMAIL_TYPING_DELAY_MS': '0',
+                                        'LOGIN_EMAIL_CASE': 'original'}):
+                try:
+                    boundary = request_login_email(page, 'leggejr.co@gmail.com', callback)
+                except LoginRequestRejected as error:
+                    failure = error.status
+            return roots, posts, csrf_values, boundary, failure, callback.call_count
+        finally:
+            context.close()
+
+    def test_rejected_login_reloads_fresh_csrf_and_retries_once(self):
+        roots, posts, csrf, boundary, failure, calls = self.exercise_login_retry([422, 200])
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(len(roots), 2)
+        self.assertEqual(csrf, ['token-1', 'token-2'])
+        self.assertEqual(boundary, 20)
+        self.assertIsNone(failure)
+        self.assertEqual(calls, 2)
+
+    def test_repeated_rejection_stops_after_second_submission(self):
+        roots, posts, _, _, failure, _ = self.exercise_login_retry([422])
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(len(roots), 2)
+        self.assertEqual(failure, 422)
+
+    def test_rate_limit_is_not_retried(self):
+        roots, posts, _, _, failure, _ = self.exercise_login_retry([429])
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(failure, 429)

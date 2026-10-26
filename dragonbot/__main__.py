@@ -64,6 +64,24 @@ def visible(page, name):
     return page.locator(os.environ[name]).filter(visible=True)
 
 
+def wait_rendered(page, locator):
+    locator.wait_for(state='visible')
+    element = locator.element_handle()
+    try:
+        page.wait_for_function("""(element) => {
+            if (!element?.isConnected) return false;
+            for (let node = element; node; node = node.parentElement) {
+                const style = getComputedStyle(node);
+                if (style.visibility !== 'visible' || style.display === 'none' ||
+                    Number(style.opacity) < 0.99 || node.hidden || node.inert) return false;
+            }
+            return true;
+        }""", arg=element)
+    finally:
+        if element is not None:
+            element.dispose()
+
+
 def prepare_login(page):
     email = page.locator(os.environ['EMAIL_SELECTOR'])
     entry_selector = os.environ.get('LOGIN_ENTRY_SELECTOR')
@@ -71,13 +89,15 @@ def prepare_login(page):
         entry = page.locator(entry_selector)
         email.or_(entry).filter(visible=True).first.wait_for(state='visible')
         if not email.is_visible():
+            wait_rendered(page, entry)
             entry.click()
-    email.wait_for(state='visible')
+    wait_rendered(page, email)
 
 
 def fill_login_email(page, account):
     submitted = account.upper() if os.environ.get('LOGIN_EMAIL_CASE', 'upper') == 'upper' else account
     field = page.locator(os.environ['EMAIL_SELECTOR'])
+    wait_rendered(page, field)
     print('Entering login email with paced keystrokes.', flush=True)
     field.fill('')
     field.press_sequentially(submitted, delay=email_typing_delay_ms())
@@ -88,13 +108,16 @@ def fill_login_email(page, account):
 
 
 class LoginRequestRejected(RuntimeError):
-    pass
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f'HTTP {status}')
 
 
 def submit_login_code_request(page):
     field = page.locator(os.environ['EMAIL_SELECTOR'])
     native_post = field.evaluate('(e) => e.form?.method.toLowerCase() === "post"')
     button = page.locator(os.environ['EMAIL_SUBMIT_SELECTOR']).filter(visible=True)
+    wait_rendered(page, button)
     # Check actionability before the single actual arrow click; trial does not submit.
     button.click(trial=True)
     print('Email entered; clicking the Send me a code arrow.', flush=True)
@@ -105,9 +128,25 @@ def submit_login_code_request(page):
         if response is not None:
             print(f'Login form response: HTTP {response.status}', flush=True)
             if response.status >= 400:
-                raise LoginRequestRejected(f'HTTP {response.status}')
+                raise LoginRequestRejected(response.status)
     else:
         button.click()
+
+
+def request_login_email(page, account, before_request=None):
+    for attempt in range(2):
+        submitted = fill_login_email(page, account)
+        boundary = before_request() if before_request else None
+        print(f'Requesting login code for {submitted} (attempt {attempt + 1}/2).', flush=True)
+        try:
+            submit_login_code_request(page)
+            return boundary
+        except LoginRequestRejected as error:
+            if error.status != 422 or attempt == 1:
+                raise
+            print('Login rejected with HTTP 422; reloading the login form for one retry.', flush=True)
+            page.goto('https://dragonkind.com', wait_until='domcontentloaded')
+            prepare_login(page)
 
 
 def click_transition(page, target):
@@ -235,12 +274,8 @@ def play(browser, route, state, account):
         # Establish the UID boundary before requesting a new code. Old messages are ignored.
         phase = 'connecting to Gmail inbox'
         with inbox() as client:
-            boundary = highwater(client)
-            phase = 'preparing the login email'
-            submitted = fill_login_email(page, account)
-            print(f'Requesting login code for {submitted}.', flush=True)
             phase = 'submitting the login email'
-            submit_login_code_request(page)
+            boundary = request_login_email(page, account, before_request=lambda: highwater(client))
             phase = 'waiting for the code-entry field'
             print('Send-code button clicked; waiting for the code-entry field.', flush=True)
             page.locator(os.environ['MFA_SELECTOR']).wait_for(state='visible')
