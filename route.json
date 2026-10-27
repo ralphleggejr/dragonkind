@@ -10,10 +10,12 @@
   ],
   "steps": [
     [
-      "Brave threshing"
+      "Brave threshing",
+      "Continue your story"
     ],
     [
-      "Brave threshing"
+      "Brave threshing",
+      "Continue your story"
     ],
     [
       "continue"
@@ -29,7 +31,8 @@
     ],
     [
       "Lower your eyes and hold still",
-      "Lower your eyes in respect"
+      "Lower your eyes in respect",
+      {"prefix": "Lower your eyes and turn to"}
     ],
     [
       "Head deeper into the forest"
@@ -65,18 +68,19 @@
       "continue"
     ],
     [
-      "Descend quickly in preparation for whatever's coming your way"
+      {"prefix": "Climb down slowly to pursue"}
     ],
     [
-      "jump now and you can land on it's back"
+      "continue"
     ],
     [
-      "Hold the red's gaze. No guts, no glory and all."
+      "continue"
     ],
     [
-      "Hope for the best"
+      {"prefix": "Lower your eyes but keep your"}
     ]
   ],
   "shadow_checkpoint": 18,
+  "recorded_ending": true,
   "cooldown_seconds": 14400
 }

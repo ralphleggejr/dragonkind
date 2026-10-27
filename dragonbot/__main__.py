@@ -4,8 +4,8 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
-from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections
+from urllib.parse import urljoin, urlsplit
+from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures
 from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
@@ -97,8 +97,20 @@ RECORDED_LOGIN_ROLES = {
 def login_locator(page, name):
     if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded' and name in RECORDED_LOGIN_ROLES:
         role, label = RECORDED_LOGIN_ROLES[name]
+        if name == 'AUTH_READY_SELECTOR':
+            return page.get_by_role(role, name=label, exact=True).or_(
+                page.get_by_role('link', name='Continue your story', exact=True)).filter(visible=True)
         return page.get_by_role(role, name=label, exact=True)
     return page.locator(os.environ[name])
+
+
+def story_controls(page):
+    controls = page.locator(os.environ['CHOICES_SELECTOR'])
+    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+        for role, name in (('link', 'Brave Threshing'), ('button', 'Brave Threshing'),
+                           ('link', 'Continue your story'), ('button', 'Continue your story')):
+            controls = controls.or_(page.get_by_role(role, name=name, exact=True))
+    return controls.filter(visible=True)
 
 
 def prepare_login(page):
@@ -178,6 +190,7 @@ def request_login_email(page, account, before_request=None, restart_page=None):
 
 
 def click_transition(page, target):
+    wait_rendered(page, target)
     before = page.locator('body').inner_text()
     url = page.url
     target.click()
@@ -200,6 +213,8 @@ def execute_choice(page, selection):
     }""", control_id)
     if not control:
         raise RuntimeError('Choice label does not identify an enabled radio input')
+    # The site intentionally dims unselected labels when a saved radio is checked.
+    # Playwright still waits for the label to be visible, stable, and clickable.
     selection.click()
     page.wait_for_function('(id) => document.getElementById(id)?.checked === true', arg=control_id)
     # Selection alone does not advance the story; submit only after it is checked.
@@ -224,9 +239,11 @@ def login_page_status(page):
             'email': login_locator(page, 'EMAIL_SELECTOR'),
             'verification_code': login_locator(page, 'MFA_SELECTOR'),
             'brave_threshing_link': login_locator(page, 'AUTH_READY_SELECTOR'),
+            'continue_story_link': page.get_by_role('link', name='Continue your story', exact=True),
             'cooldown': page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label'),
             'profile': page.locator('button[popovertarget="profile"]'),
             'brave_threshing_button': page.get_by_role('button', name='Brave Threshing', exact=True),
+            'continue_story_button': page.get_by_role('button', name='Continue your story', exact=True),
             'story_choices': page.locator('form#choices label[for^="choice-"]'),
         }
         return {
@@ -266,7 +283,8 @@ def confirm_login(page, allow_existing_session=False, progress=None):
         return 'ready'
     cooldown = page.locator('#cooldown-label')
     profile = page.locator('button[popovertarget="profile"]')
-    archway = page.get_by_role('button', name='Brave Threshing', exact=True)
+    archway = page.get_by_role('button', name='Brave Threshing', exact=True).or_(
+        page.get_by_role('button', name='Continue your story', exact=True)).filter(visible=True)
     story = page.locator('form#choices label[for^="choice-"]')
     ready.or_(cooldown).or_(profile).or_(archway).or_(story).filter(visible=True).first.wait_for(state='visible')
     current = urlsplit(page.url)
@@ -276,11 +294,15 @@ def confirm_login(page, allow_existing_session=False, progress=None):
         return 'cooldown'
     if ready.is_visible():
         return 'ready'
+    if current.path == '/archway' and archway.count() == 1:
+        return 'archway'
     return 'in_progress' if current.path in ('/archway', '/play') else 'authenticated'
 
 
-def wait_story_ready(page):
-    ready = page.locator(os.environ['CHOICES_SELECTOR']).or_(page.locator(os.environ['DEATH_SELECTOR']))
+def wait_story_ready(page, allow_result=False):
+    ready = story_controls(page).or_(page.locator(os.environ['DEATH_SELECTOR']))
+    if allow_result:
+        ready = ready.or_(page.get_by_role('link', name='Continue', exact=True))
     if os.environ.get('DEATH_NARRATIVE_SELECTOR'):
         ready = ready.or_(page.locator(os.environ['DEATH_NARRATIVE_SELECTOR']))
     ready.filter(visible=True).first.wait_for(state='visible')
@@ -324,9 +346,11 @@ def site_cooldown_deadline(page, fallback_seconds):
 
 def logout_from_profile(page):
     if os.environ.get('PROFILE_SELECTOR'):
-        visible(page, 'PROFILE_SELECTOR').click()
+        profile = visible(page, 'PROFILE_SELECTOR')
+        wait_rendered(page, profile)
+        profile.click()
     sign_out = page.locator(os.environ['SIGN_OUT_SELECTOR']).filter(visible=True)
-    sign_out.wait_for(state='visible')
+    wait_rendered(page, sign_out)
     sign_out.click()
     prepare_login(page)
 
@@ -336,9 +360,13 @@ def account_ready_for_story(page, route, state, account, login_status):
         return True
     ready = login_locator(page, 'AUTH_READY_SELECTOR')
     cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
+    if login_status in ('in_progress', 'archway'):
+        print('Opening Rotunda to use the recorded story entry path.', flush=True)
+        page.goto('https://dragonkind.com/rotunda', wait_until='domcontentloaded')
+        login_status = 'authenticated'
     # Profile can appear before the animated ready/cooldown panel; wait for that panel.
     if login_status == 'authenticated':
-        print('Login confirmed; waiting for Brave Threshing or the site cooldown panel.', flush=True)
+        print('Login confirmed; waiting for Brave Threshing, Continue your story, or the cooldown panel.', flush=True)
         ready.or_(cooldown).filter(visible=True).first.wait_for(state='visible')
     if cooldown.is_visible():
         record = state['accounts'][account]
@@ -348,12 +376,75 @@ def account_ready_for_story(page, route, state, account, login_status):
         logout_from_profile(page)
         print(f'{account} is already cooling down; moving to the next account.', flush=True)
         return False
-    if login_status == 'in_progress':
-        alert(state, account, 'Account already has a game in progress; review before restarting its route.',
-              page, global_pause=False)
-        return False
     ready.wait_for(state='visible')
     return True
+
+
+def inspect_resumed_story(page, route, state, account):
+    # Continue-only pages reveal narrative; only a unique recorded choice identifies position.
+    for revealed in range(4):
+        result = page.get_by_role('link', name='Continue', exact=True).filter(visible=True)
+        terminal = visible(page, 'DEATH_SELECTOR')
+        story_controls(page).or_(result).or_(terminal).first.wait_for(state='visible')
+        if terminal.count():
+            return len(route['steps'])
+        choices = page.locator('label[for^="choice-"]').filter(visible=True)
+        if choices.count():
+            labels = choices.all_inner_texts()
+            index = locate_story_step(labels, route['steps'])
+            state['accounts'][account]['step'] = index
+            save_state(STATE, state)
+            if index == route['shadow_checkpoint'] and shadow(labels):
+                alert(state, account, 'A story option mentions shadow', page,
+                      os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
+                return None
+            print(f'Resuming at story step {index + 1}, identified from the visible choices.', flush=True)
+            return index
+        if result.count():
+            finish_recorded_ending(page, route, state, account, allow_partial=True)
+            return None
+        onward = page.get_by_role('button', name='Continue', exact=True).filter(visible=True)
+        if revealed == 3 or onward.count() != 1:
+            raise RuntimeError('Cannot identify the resumed story within three Continue pages')
+        click_transition(page, onward)
+    raise RuntimeError('Cannot identify the resumed story')
+
+
+def finish_recorded_ending(page, route, state, account, allow_partial=False):
+    # The supplied endings have two or three Continue buttons, then a Rotunda link.
+    # The site's actual cooldown panel, rather than these buttons, proves completion.
+    record = state['accounts'][account]
+    for count in range(4):
+        onward = page.get_by_role('button', name='Continue', exact=True).filter(visible=True)
+        result = page.get_by_role('link', name='Continue', exact=True).filter(visible=True)
+        choices = page.locator('label[for^="choice-"]').filter(visible=True)
+        onward.or_(result).or_(choices).first.wait_for(state='visible')
+        if choices.count():
+            raise RuntimeError('Unexpected choice during the recorded ending')
+        if result.count():
+            if (not allow_partial and count not in (2, 3)) or result.count() != 1 or onward.count():
+                raise RuntimeError('Unrecognized recorded ending')
+            target = urlsplit(urljoin(page.url, result.get_attribute('href') or ''))
+            if target.scheme != 'https' or target.hostname != 'dragonkind.com' or target.path != '/rotunda':
+                raise RuntimeError('Recorded result link must lead to Rotunda')
+            wait_rendered(page, result)
+            click_transition(page, result)
+            cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
+            wait_rendered(page, cooldown)
+            record.update(status='logging_out', next_run=max(record.get('next_run', 0),
+                          time.time() + route['cooldown_seconds']))
+            save_state(STATE, state)
+            logout_from_profile(page)
+            record.update(status='cooldown', step=0)
+            save_state(STATE, state)
+            print(f'Recorded ending and site cooldown confirmed for {account}; cooldown is four hours.', flush=True)
+            return
+        if count == 3 or onward.count() != 1:
+            raise RuntimeError('Recorded ending exceeded its allowed Continue pages')
+        record['step'] = len(route['steps']) + count
+        save_state(STATE, state)
+        wait_rendered(page, onward)
+        click_transition(page, onward)
 
 
 def logout_after_death(page):
@@ -441,22 +532,48 @@ def play(browser, route, state, account, restart_browser=None):
             return
         story_started = True
         phase = 'following the story route'
-        for index, options in enumerate(route['steps']):
+        index = 0
+        resume_pending = False
+        while index < len(route['steps']):
+            if resume_pending and index > 0:
+                phase = 'inspecting the resumed story'
+                wait_story_ready(page, allow_result=True)
+                entry = page.get_by_role('button', name='Continue your story', exact=True).filter(visible=True)
+                if index != 1 or not entry.count():
+                    start = inspect_resumed_story(page, route, state, account)
+                    if start is None:
+                        return
+                    index = start
+                    resume_pending = False
+                    if index == len(route['steps']):
+                        break
+                phase = 'following the story route'
+            options = route['steps'][index]
             record['step'] = index
             save_state(STATE, state)
             wait_story_ready(page)
             if finish_known_death_pages(page):
                 break
-            labels = visible(page, 'CHOICES_SELECTOR').all_inner_texts()
+            controls = story_controls(page)
+            labels = controls.all_inner_texts()
             if index == route['shadow_checkpoint'] and shadow(labels):
                 alert(state, account, 'A story option mentions shadow', page,
                       os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
                 return
-            selection = choose(labels, options, allow_contains=index == len(route['steps']) - 1)
-            execute_choice(page, visible(page, 'CHOICES_SELECTOR').nth(selection))
+            selection = choose(labels, options, allow_contains=options == ['Hope for the best'])
+            print(f'Story step {index + 1}: {labels[selection].strip()}', flush=True)
+            if index < 2 and normalized(labels[selection]) == 'continue your story':
+                resume_pending = True
+            execute_choice(page, controls.nth(selection))
+            index += 1
         wait_story_ready(page)
-        if not finish_known_death_pages(page):
-            raise RuntimeError('Route ended without a confirmed death screen')
+        if not visible(page, 'DEATH_SELECTOR').count():
+            if route.get('recorded_ending'):
+                phase = 'following the recorded ending and confirming site cooldown'
+                finish_recorded_ending(page, route, state, account)
+                return
+            if not finish_known_death_pages(page):
+                raise RuntimeError('Route ended without a confirmed death screen')
         # Start cooldown on confirmation, even if logout subsequently fails.
         record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')
         save_state(STATE, state)
@@ -495,7 +612,7 @@ def run_account(playwright, route, state, account, headless=True):
             print(f'Browser fully closed for {account}.', flush=True)
 
 
-def run(headless=True, retry_rejected=False):
+def run(headless=True, retry_rejected=False, resume_stories=False):
     from playwright.sync_api import sync_playwright
     route = configuration()
     state = load_state(STATE)
@@ -504,6 +621,9 @@ def run(headless=True, retry_rejected=False):
     if retry_rejected:
         retried = retry_login_rejections(state, active_accounts)
         print('Retrying only previous pre-MFA HTTP 422 failures: ' + (', '.join(retried) or 'none'), flush=True)
+    if resume_stories:
+        resumed = resume_story_failures(state, active_accounts)
+        print('Rechecking saved story failures against the visible site: ' + (', '.join(resumed) or 'none'), flush=True)
     save_state(STATE, state)
     print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
     for account, record in state['accounts'].items():
@@ -653,6 +773,7 @@ def main():
     parser.add_argument('--account')
     parser.add_argument('--confirm-site-reset', action='store_true')
     parser.add_argument('--retry-login-errors', action='store_true', help='Retry only saved pre-MFA HTTP 422 rejections; retain cooldowns and other pauses.')
+    parser.add_argument('--resume-stories', action='store_true', help='Recheck saved story-stage failures using the recorded entry and visible choices; retain shadow pauses and cooldowns.')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
@@ -662,7 +783,7 @@ def main():
         load_dotenv(dotenv_path=Path('.env'), override=False)
         os.environ['LOGIN_FLOW'] = 'recorded'
         os.environ['LOGIN_EMAIL_CASE'] = 'original'
-        run(headless=False, retry_rejected=args.retry_login_errors)
+        run(headless=False, retry_rejected=args.retry_login_errors, resume_stories=args.resume_stories)
     elif args.command in ('replay-login', 'desktop-login'):
         if not args.account:
             parser.error(f'{args.command} requires --account')
@@ -683,7 +804,7 @@ def main():
         refresh_global_pause(state, route['accounts'])
         save_state(STATE, state)
     else:
-        run(retry_rejected=args.retry_login_errors)
+        run(retry_rejected=args.retry_login_errors, resume_stories=args.resume_stories)
 
 
 if __name__ == '__main__':

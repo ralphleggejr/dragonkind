@@ -6,7 +6,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 from unittest.mock import patch
-from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections
+from dragonbot.core import DEFAULT_CODE_REGEX, choose, extract_code, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, locate_story_step, resume_story_failures
 
 
 class Decisions(unittest.TestCase):
@@ -28,9 +28,30 @@ class Decisions(unittest.TestCase):
         branches = route['steps'][6]
         for label in ('Lower your eyes and hold still', 'Lower your eyes in respect'):
             self.assertEqual(choose(['Run away', 'Attack', label], branches), 2)
+        self.assertEqual(choose(['Run away', 'Lower your eyes and turn to leave'], branches), 1)
         self.assertEqual(route['steps'][7], ['Head deeper into the forest'])
-        self.assertEqual(choose(['Wait', 'Descend quickly in preparation for whatever’s coming your way'],
+        self.assertEqual(choose(['Wait', 'Climb down slowly to pursue the sound'],
                                 route['steps'][route['shadow_checkpoint']]), 1)
+
+    def test_recorded_prefix_requires_one_match_and_a_word_boundary(self):
+        prefix = [{'prefix': 'Lower your eyes but keep your'}]
+        self.assertEqual(choose(['Run', 'Lower your eyes but keep your head high'], prefix), 1)
+        with self.assertRaises(RuntimeError):
+            choose(['Lower your eyes but keep your head high', 'Lower your eyes but keep your hands still'], prefix)
+        with self.assertRaises(RuntimeError):
+            choose(['Lower your eyes but keep yourself safe'], prefix)
+        with self.assertRaises(RuntimeError):
+            choose(['Run'], [{'prefix': ''}])
+
+    def test_resume_position_requires_a_unique_recorded_choice(self):
+        steps = json.loads(Path('route.json').read_text())['steps']
+        self.assertEqual(locate_story_step(['Lower your eyes and turn to leave', 'Run'], steps), 6)
+        self.assertEqual(locate_story_step(['Climb down slowly to pursue the sound', 'Wait'], steps), 18)
+        for labels in (['Continue'], ['An unknown choice'],
+                       ['Help your squadmate', 'Investigate the scream'],
+                       ['Lower your eyes and turn to leave', 'Lower your eyes and turn to attack']):
+            with self.subTest(labels=labels), self.assertRaises(RuntimeError):
+                locate_story_step(labels, steps)
 
     def test_shadow_in_any_option(self):
         self.assertTrue(shadow(['a', 'b', 'A shadow moves']))
@@ -218,6 +239,23 @@ class Decisions(unittest.TestCase):
         self.assertEqual(state['accounts']['shadow@gmail.com']['status'], 'paused')
         self.assertTrue(state['global_pause'])
 
+    def test_resume_stories_retains_shadow_mail_errors_inactive_accounts_and_cooldowns(self):
+        state = {'accounts': {
+            'story@gmail.com': {'status': 'paused', 'step': 6, 'next_run': 9000,
+                'reason': 'Failure while following the story route (RuntimeError)', 'pause_scope': 'global'},
+            'shadow@gmail.com': {'status': 'paused', 'step': 18, 'reason': 'A story option mentions shadow', 'pause_scope': 'account'},
+            'mail@gmail.com': {'status': 'paused', 'reason': 'Failure while waiting for the verification email (TimeoutError)', 'pause_scope': 'global'},
+            'excluded@gmail.com': {'status': 'paused', 'reason': 'Failure while following the story route (RuntimeError)', 'pause_scope': 'global'}},
+            'global_pause': True}
+        self.assertEqual(resume_story_failures(state, ['story@gmail.com', 'shadow@gmail.com', 'mail@gmail.com']), ['story@gmail.com'])
+        record = state['accounts']['story@gmail.com']
+        self.assertEqual(record['status'], 'pending')
+        self.assertEqual(record['next_run'], 9000)
+        self.assertIn('previous_story_failure', record)
+        for account in ('shadow@gmail.com', 'mail@gmail.com', 'excluded@gmail.com'):
+            self.assertEqual(state['accounts'][account]['status'], 'paused')
+        self.assertTrue(state['global_pause'])
+
     def test_desktop_scheduler_ignores_removed_account_pause_and_skips_individual_cooldowns(self):
         from dragonbot.__main__ import run
         from unittest.mock import MagicMock
@@ -254,7 +292,9 @@ class Decisions(unittest.TestCase):
         self.assertEqual(len(set(route['accounts'])), 7)
         self.assertEqual(route['cooldown_seconds'], 14400)
         self.assertEqual(route['steps'][route['shadow_checkpoint']],
-                         ["Descend quickly in preparation for whatever's coming your way"])
+                         [{'prefix': 'Climb down slowly to pursue'}])
+        self.assertEqual(route['steps'][-1], [{'prefix': 'Lower your eyes but keep your'}])
+        self.assertTrue(route['recorded_ending'])
 
 
 if __name__ == '__main__':

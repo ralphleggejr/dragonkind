@@ -12,13 +12,38 @@ def normalized(text):
     return ' '.join(text.lower().replace('’', "'").split()).rstrip('.!?')
 
 
+def matching_choices(labels, alternatives, allow_contains=False):
+    def matches_alternative(label, alternative):
+        text = normalized(label)
+        if isinstance(alternative, dict):
+            if set(alternative) != {'prefix'} or not isinstance(alternative['prefix'], str) or not alternative['prefix'].strip():
+                raise RuntimeError('Invalid recorded choice prefix')
+            prefix = normalized(alternative['prefix'])
+            return text == prefix or text.startswith(prefix + ' ')
+        wanted = normalized(alternative)
+        return text == wanted or (allow_contains and wanted in text)
+    return [i for i, label in enumerate(labels)
+            if any(matches_alternative(label, alternative) for alternative in alternatives)]
+
+
 def choose(labels, alternatives, allow_contains=False):
-    wanted = [normalized(x) for x in alternatives]
-    matches = [i for i, label in enumerate(labels)
-               if any(normalized(label) == x or (allow_contains and x in normalized(label)) for x in wanted)]
+    matches = matching_choices(labels, alternatives, allow_contains)
     if len(matches) != 1:
         raise RuntimeError(f'Expected one route choice, found {len(matches)}')
     return matches[0]
+
+
+def locate_story_step(labels, steps):
+    candidates = []
+    for index, alternatives in enumerate(steps[2:], 2):
+        matches = matching_choices(labels, alternatives)
+        if len(matches) > 1:
+            raise RuntimeError('Multiple options match a recorded story step')
+        if matches:
+            candidates.append(index)
+    if len(candidates) != 1:
+        raise RuntimeError('Cannot uniquely identify the current story step')
+    return candidates[0]
 
 
 def shadow(labels):
@@ -114,3 +139,23 @@ def retry_login_rejections(state, configured_accounts):
             retried.append(account)
     refresh_global_pause(state, configured_accounts)
     return retried
+
+
+def resume_story_failures(state, configured_accounts):
+    resumed = []
+    phases = ('Failure while following the story route (',
+              'Failure while following the recorded ending and confirming site cooldown (',
+              'Failure while checking the story start or cooldown panel (',
+              'Failure while inspecting the resumed story (',
+              'Account already has a game in progress;')
+    for account in configured_accounts:
+        record = state['accounts'].get(account, {})
+        reason = record.get('reason', '')
+        if record.get('status') == 'paused' and reason.startswith(phases):
+            record['previous_story_failure'] = reason
+            record.update(status='pending', notification_pending=False)
+            record.pop('reason', None)
+            record.pop('pause_scope', None)
+            resumed.append(account)
+    refresh_global_pause(state, configured_accounts)
+    return resumed

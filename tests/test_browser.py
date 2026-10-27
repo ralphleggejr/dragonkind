@@ -32,11 +32,12 @@ class BrowserFlow(unittest.TestCase):
         cls.flow_patch.stop()
 
     def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2, red_dragon=False, result_flow=False):
-        rows = [[options[0], 'Other choice'] for options in ROUTE['steps']]
+        rows = [[options[0]['prefix'] + ' the recorded continuation' if isinstance(options[0], dict)
+                 else options[0], 'Other choice'] for options in ROUTE['steps']]
         if red_dragon:
             rows[6] = ['Run away', 'Attack', 'Lower your eyes in respect']
         if forms:
-            rows[ROUTE['shadow_checkpoint']][0] = 'Descend quickly in preparation for whatever’s coming your way'
+            rows[ROUTE['shadow_checkpoint']][0] = 'Climb down slowly to pursue the sound'
         if mismatch:
             rows[0] = ['Unrecognized choice']
         if shadow:
@@ -206,6 +207,23 @@ class BrowserFlow(unittest.TestCase):
         finally:
             context.close()
 
+    def test_resume_can_change_an_intentionally_dimmed_saved_radio_choice(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(1000)
+            page.set_content('''<style>.choices:has(:checked) input:not(:checked)+label{opacity:.4}</style>
+                <form id="choices" class="choices" onsubmit="event.preventDefault();document.body.innerHTML='<p>Next scene</p>'">
+                <input hidden type="radio" name="choice" id="other" checked><label for="other">Another option</label>
+                <input hidden type="radio" name="choice" id="wanted"><label for="wanted">Help your squadmate</label>
+                </form><button form="choices" data-choices-submit>Next Scene</button>''')
+            with patch.dict(os.environ, {'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit]'}):
+                self.assertEqual(page.locator('label[for=wanted]').evaluate('(e)=>getComputedStyle(e).opacity'), '0.4')
+                execute_choice(page, page.locator('label[for=wanted]'))
+                self.assertEqual(page.locator('body').inner_text(), 'Next scene')
+        finally:
+            context.close()
+
     def test_death_continue_rotunda_profile_and_signout(self):
         state, emails = self.exercise(auto_submit=True, forms=True, logout_flow=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
@@ -238,6 +256,163 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(record['status'], 'cooldown')
         self.assertGreater(record['next_run'], __import__('time').time() + 14300)
         self.assertEqual(emails, 0)
+
+    def exercise_latest_recording(self, resumed=False, red=False, ending_pages=2,
+                                  shadow_option=False, cooldown=True, direct_play=False, known_narrative=False,
+                                  resume_scene=0):
+        account = ROUTE['accounts'][0]
+        context = self.browser.new_context()
+        requests, selected = [], []
+        context.expose_function('captureChoice', lambda text: selected.append(text))
+        rows = [alternatives[0]['prefix'] + ' the recorded continuation'
+                if isinstance(alternatives[0], dict) else alternatives[0] for alternatives in ROUTE['steps'][2:]]
+        rows[4] = 'Lower your eyes in respect' if red else 'Lower your eyes and turn to leave'
+        rows[16] = 'Climb down slowly to pursue the sound'
+        rows[19] = 'Lower your eyes but keep your head high'
+        entry = 'Continue your story' if resumed else 'Brave Threshing'
+        play_html = '''<html><body><script>
+            const rows=ROWS; let scene=START_SCENE; const endingPages=ENDING;
+            function draw() {
+                if(scene >= rows.length) {
+                    document.body.innerHTML = scene < rows.length+endingPages
+                      ? `<p>Recorded ending page ${scene-rows.length+1}</p><button data-page-next onclick="next()">Continue</button>`
+                      : '<p>End of attempt</p><a class="onward" href="/rotunda">Continue</a>';
+                    if(KNOWN_NARRATIVE && scene===rows.length) document.body.insertAdjacentHTML('afterbegin', '<strong class="display">Sometimes they don’t.</strong>');
+                    return;
+                }
+                let label=rows[scene];
+                if(label.toLowerCase()==='continue') {
+                    document.body.innerHTML=`<p>Scene ${scene}</p><button data-page-next onclick="next()">Continue</button>`;
+                } else {
+                    let options=[label, 'Another choice'];
+                    if(SHADOW && scene===16) options.push('Follow the shadow');
+                    document.body.innerHTML=`<p>Scene ${scene}</p><form id="choices" onsubmit="event.preventDefault();const input=this.querySelector(':checked');if(input){captureChoice(this.querySelector('label[for='+input.id+']').textContent);next()}">`+
+                      options.map((text,i)=>`<input hidden type="radio" required name="choice" id="choice-${i}" value="${i}"><label for="choice-${i}">${text}</label>`).join('')+
+                      '</form><button data-choices-submit form="choices">Next Scene</button>';
+                }
+            }
+            function next(){scene++;draw()} draw();
+            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene))
+        def site(route):
+            from urllib.parse import urlsplit
+            path = urlsplit(route.request.url).path
+            requests.append(path)
+            if path == '/enter':
+                target = '/play' if direct_play else '/rotunda'
+                body = f'<label for="code">Six-character code</label><input id="code" oninput="if(this.value.length===6)location.href=\'{target}\'">'
+            elif path == '/rotunda':
+                profile = '<button popovertarget="profile">Profile</button><div id="profile" popover><button class="text-link" onclick="location.href=\'/\'">Sign out</button></div>'
+                if requests.count('/rotunda') > 1:
+                    body = ('<p id="cooldown-label">You can brave Threshing again in</p>' if cooldown else '<p>No cooldown was confirmed</p>') + profile
+                else:
+                    body = f'<a class="button" href="/archway">{entry}</a>' + profile
+            elif path == '/archway':
+                body = f'<button type="button" onclick="location.href=\'/play\'">{entry}</button>'
+            elif path == '/play':
+                body = play_html if not direct_play or '/archway' in requests else '<form id="choices"><input id="choice-0" type="radio"><label for="choice-0">A mid-story choice</label></form>'
+            else:
+                body = '<form method="post" action="/enter"><label for="email">Email Address</label><input id="email" name="reader"><button aria-label="Send me a code">→</button></form>'
+            route.fulfill(content_type='text/html; charset=utf-8', body=body)
+        context.route('https://dragonkind.com/**', site)
+        wrapped = MagicMock()
+        wrapped.new_context.return_value = context
+        state = {'accounts': {}, 'global_pause': False}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'LOGIN_EMAIL_CASE': 'original',
+                    'PAGE_LOAD_TIMEOUT_SECONDS': '1', 'MFA_AUTO_SUBMIT': 'true',
+                    'CHOICES_SELECTOR': 'a.button[href="/archway"], button[data-page-next], label[for^="choice-"]',
+                    'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form="choices"]',
+                    'DEATH_SELECTOR': '#terminal-death', 'DEATH_NARRATIVE_SELECTOR': 'strong.display' if known_narrative else '',
+                    'COOLDOWN_SELECTOR': '#cooldown-label', 'PROFILE_SELECTOR': 'button[popovertarget="profile"]',
+                    'SIGN_OUT_SELECTOR': 'button.text-link', 'SHADOW_PAUSE_SCOPE': 'account'}), \
+                 patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
+                 patch('dragonbot.__main__.inbox'), patch('dragonbot.__main__.highwater', return_value=10), \
+                 patch('dragonbot.__main__.wait_code', return_value='ABC123'), \
+                 patch('dragonbot.__main__.notify') as notify, patch('playwright.sync_api.Page.screenshot'):
+                play(wrapped, ROUTE, state, account)
+                saved = json.loads((Path(directory) / 'state.json').read_text())
+        return saved, requests, selected, notify.call_count
+
+    def test_new_brown_walkthrough_reaches_cooldown_and_signs_out(self):
+        state, requests, selected, emails = self.exercise_latest_recording()
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertFalse(state['global_pause'])
+        self.assertIn('Lower your eyes and turn to leave', selected)
+        self.assertIn('Climb down slowly to pursue the sound', selected)
+        self.assertIn('Lower your eyes but keep your head high', selected)
+        self.assertEqual(requests.count('/rotunda'), 2)
+        self.assertEqual(requests[-1], '/')
+        self.assertEqual(emails, 0)
+
+    def test_continue_your_story_recording_accepts_three_ending_pages(self):
+        state, requests, selected, _ = self.exercise_latest_recording(resumed=True, ending_pages=3)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertIn('/archway', requests)
+        self.assertEqual(selected[-1], 'Lower your eyes but keep your head high')
+
+    def test_new_red_walkthrough_uses_same_recorded_post_tree_path(self):
+        state, _, selected, _ = self.exercise_latest_recording(red=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertIn('Lower your eyes in respect', selected)
+        self.assertNotIn('Lower your eyes and turn to leave', selected)
+
+    def test_direct_mid_story_login_returns_to_rotunda_entry_before_choices(self):
+        state, requests, selected, _ = self.exercise_latest_recording(resumed=True, direct_play=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertLess(requests.index('/play'), requests.index('/rotunda'))
+        self.assertNotIn('A mid-story choice', selected)
+
+    def test_shadow_still_pauses_before_new_tree_choice(self):
+        state, requests, selected, emails = self.exercise_latest_recording(shadow_option=True)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['step'], ROUTE['shadow_checkpoint'])
+        self.assertFalse(state['global_pause'])
+        self.assertNotIn('Climb down slowly to pursue the sound', selected)
+        self.assertEqual(requests.count('/rotunda'), 1)
+        self.assertEqual(emails, 1)
+
+    def test_recorded_ending_never_sets_cooldown_without_site_confirmation(self):
+        state, _, _, _ = self.exercise_latest_recording(cooldown=False)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record.get('next_run', 0), 0)
+        self.assertTrue(state['global_pause'])
+
+    def test_recorded_ending_stops_after_three_continue_buttons(self):
+        state, requests, _, _ = self.exercise_latest_recording(ending_pages=4)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
+        self.assertEqual(requests.count('/rotunda'), 1)
+        self.assertTrue(state['global_pause'])
+
+    def test_recorded_ending_accepts_changing_death_prose_and_requires_cooldown(self):
+        state, _, _, _ = self.exercise_latest_recording(known_narrative=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+
+    def test_resumed_story_identifies_a_mid_story_choice_without_restarting_steps(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=4)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(selected[0], 'Lower your eyes and turn to leave')
+        self.assertNotIn('Enter the valley alone', selected)
+
+    def test_resumed_continue_page_reveals_and_identifies_the_next_known_choice(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=10)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(selected[0], 'Allow your squadmate to exact their own revenge')
+
+    def test_resumed_tree_checkpoint_still_pauses_on_shadow(self):
+        state, _, selected, emails = self.exercise_latest_recording(resumed=True, resume_scene=16, shadow_option=True)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['step'], ROUTE['shadow_checkpoint'])
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(selected, [])
+        self.assertEqual(emails, 1)
+
+    def test_resumed_result_link_requires_site_cooldown_and_no_extra_choices(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=22)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(selected, [])
 
     def test_hidden_result_does_not_confirm_death(self):
         context = self.browser.new_context()
