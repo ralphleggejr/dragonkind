@@ -268,7 +268,7 @@ class BrowserFlow(unittest.TestCase):
         context.expose_function('captureChoice', lambda text: selected.append(text))
         rows = [alternatives[0]['prefix'] + ' the recorded continuation'
                 if isinstance(alternatives[0], dict) else alternatives[0] for alternatives in ROUTE['steps'][2:]]
-        rows[4] = 'Lower your eyes in respect' if red else 'Lower your eyes and turn to leave'
+        rows[4] = 'Lower your eyes in respect' if red else 'Lower your eyes and turn to face it'
         rows[16] = 'Climb down slowly to pursue the sound'
         rows[19] = 'Lower your eyes but keep your head high'
         if unknown_resume:
@@ -297,6 +297,7 @@ class BrowserFlow(unittest.TestCase):
                     document.body.innerHTML=`<p>Scene ${scene}</p><button data-page-next onclick="next()">Continue</button>`;
                 } else {
                     let options=[label, 'Another choice'];
+                    if(scene===4 && !RED_DRAGON) options=['Run and hope it didn’t see you', 'Lower your eyes and hold still', label];
                     if(SHADOW && scene===16) options.push('Follow the shadow');
                     if(STAGGERED_VALLEY && scene===2) options=['Enter the valley with two of your squadmates', 'Enter the valley with three of your squadmates', label];
                     document.body.innerHTML=`<p>Scene ${scene}</p><form id="choices" onsubmit="event.preventDefault();const input=this.querySelector(':checked');if(input){captureChoice(this.querySelector('label[for='+input.id+']').textContent);next()}">`+
@@ -318,7 +319,7 @@ class BrowserFlow(unittest.TestCase):
                 appendFuture();
             }
             function next(){scene++;draw()} draw();
-            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('HIDDEN_SHADOW', json.dumps(hidden_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future)).replace('STAGGERED_VALLEY', json.dumps(staggered_valley)).replace('NEVER_REVEAL_VALLEY', json.dumps(never_reveal_valley))
+            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('HIDDEN_SHADOW', json.dumps(hidden_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future)).replace('STAGGERED_VALLEY', json.dumps(staggered_valley)).replace('NEVER_REVEAL_VALLEY', json.dumps(never_reveal_valley)).replace('RED_DRAGON', json.dumps(red))
         if role_only_continue:
             play_html = play_html.replace('data-page-next', '')
         def site(route):
@@ -365,7 +366,8 @@ class BrowserFlow(unittest.TestCase):
         state, requests, selected, emails = self.exercise_latest_recording()
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
         self.assertFalse(state['global_pause'])
-        self.assertIn('Lower your eyes and turn to leave', selected)
+        self.assertIn('Lower your eyes and turn to face it', selected)
+        self.assertNotIn('Lower your eyes and hold still', selected)
         self.assertIn('Climb down slowly to pursue the sound', selected)
         self.assertIn('Lower your eyes but keep your head high', selected)
         self.assertEqual(requests.count('/rotunda'), 2)
@@ -382,7 +384,7 @@ class BrowserFlow(unittest.TestCase):
         state, _, selected, _ = self.exercise_latest_recording(red=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
         self.assertIn('Lower your eyes in respect', selected)
-        self.assertNotIn('Lower your eyes and turn to leave', selected)
+        self.assertNotIn('Lower your eyes and turn to face it', selected)
 
     def test_direct_mid_story_login_returns_to_rotunda_entry_before_choices(self):
         state, requests, selected, _ = self.exercise_latest_recording(resumed=True, direct_play=True)
@@ -417,10 +419,11 @@ class BrowserFlow(unittest.TestCase):
         state, _, _, _ = self.exercise_latest_recording(known_narrative=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
 
-    def test_resumed_story_identifies_a_mid_story_choice_without_restarting_steps(self):
+    def test_resumed_brown_story_selects_face_it_when_hold_still_is_also_present(self):
         state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=4)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
-        self.assertEqual(selected[0], 'Lower your eyes and turn to leave')
+        self.assertEqual(selected[0], 'Lower your eyes and turn to face it')
+        self.assertNotIn('Lower your eyes and hold still', selected)
         self.assertNotIn('Enter the valley alone', selected)
 
     def test_resumed_continue_page_reveals_and_identifies_the_next_known_choice(self):

@@ -26,9 +26,14 @@ class Decisions(unittest.TestCase):
     def test_confirmed_dragon_branches_and_tree_label(self):
         route = json.loads(Path('route.json').read_text())
         branches = route['steps'][6]
-        for label in ('Lower your eyes and hold still', 'Lower your eyes in respect'):
+        for label in ('Lower your eyes and turn to face it', 'Lower your eyes in respect'):
             self.assertEqual(choose(['Run away', 'Attack', label], branches), 2)
-        self.assertEqual(choose(['Run away', 'Lower your eyes and turn to leave'], branches), 1)
+        brown = ['RUN AND HOPE IT DIDN’T SEE YOU', 'LOWER YOUR EYES AND HOLD STILL',
+                 'LOWER YOUR EYES AND TURN TO FACE IT']
+        self.assertEqual(choose(brown, branches), 2)
+        self.assertEqual(locate_story_step(brown, route['steps']), 6)
+        with self.assertRaises(RuntimeError):
+            choose(['Lower your eyes and hold still'], branches)
         self.assertEqual(route['steps'][7], ['Head deeper into the forest'])
         self.assertEqual(choose(['Wait', 'Climb down slowly to pursue the sound'],
                                 route['steps'][route['shadow_checkpoint']]), 1)
@@ -45,11 +50,11 @@ class Decisions(unittest.TestCase):
 
     def test_resume_position_requires_a_unique_recorded_choice(self):
         steps = json.loads(Path('route.json').read_text())['steps']
-        self.assertEqual(locate_story_step(['Lower your eyes and turn to leave', 'Run'], steps), 6)
+        self.assertEqual(locate_story_step(['Lower your eyes and turn to face it', 'Run'], steps), 6)
         self.assertEqual(locate_story_step(['Climb down slowly to pursue the sound', 'Wait'], steps), 18)
         for labels in (['Continue'], ['An unknown choice'],
                        ['Help your squadmate', 'Investigate the scream'],
-                       ['Lower your eyes and turn to leave', 'Lower your eyes and turn to attack']):
+                       ['Lower your eyes and turn to face it', 'LOWER YOUR EYES AND TURN TO FACE IT']):
             with self.subTest(labels=labels), self.assertRaises(RuntimeError):
                 locate_story_step(labels, steps)
 
@@ -256,14 +261,17 @@ class Decisions(unittest.TestCase):
             self.assertEqual(state['accounts'][account]['status'], 'paused')
         self.assertTrue(state['global_pause'])
 
-    def test_desktop_scheduler_ignores_removed_account_pause_and_skips_individual_cooldowns(self):
+    def test_desktop_scheduler_resumes_brown_failure_and_retains_cooldown_and_shadow_pause(self):
         from dragonbot.__main__ import run
         from unittest.mock import MagicMock
         route = json.loads(Path('route.json').read_text())
         accounts = route['accounts']
         excluded = 'ralphleggejr@gmail.com'
         state = {'accounts': {accounts[0]: {'status': 'cooldown', 'next_run': 2000},
-                              accounts[1]: {'status': 'paused', 'pause_scope': 'account'},
+                              accounts[1]: {'status': 'paused', 'pause_scope': 'global',
+                                            'reason': 'Failure while inspecting the resumed story (StoryPositionError; Multiple options match a recorded story step)'},
+                              accounts[2]: {'status': 'paused', 'pause_scope': 'account',
+                                            'reason': 'A story option mentions shadow'},
                               excluded: {'status': 'paused', 'step': 0, 'next_run': 0,
                                          'reason': 'Failure while completing login (TimeoutError)',
                                          'pause_scope': 'global'}}, 'global_pause': True}
@@ -281,9 +289,10 @@ class Decisions(unittest.TestCase):
                  patch('dragonbot.__main__.time.sleep', side_effect=StopIteration), \
                  patch('dragonbot.__main__.run_account', side_effect=attempt):
                 with self.assertRaises(StopIteration):
-                    run(headless=False)
-        self.assertEqual(played, accounts[2:])
+                    run(headless=False, resume_stories=True)
+        self.assertEqual(played, [accounts[1]] + accounts[3:])
         self.assertEqual(state['accounts'][accounts[0]]['next_run'], 2000)
+        self.assertEqual(state['accounts'][accounts[2]]['status'], 'paused')
         self.assertFalse(state['global_pause'])
         self.assertEqual(state['accounts'][excluded]['status'], 'paused')
 

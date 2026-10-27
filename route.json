@@ -30,9 +30,8 @@
       "Head toward the center of the forest"
     ],
     [
-      "Lower your eyes and hold still",
-      "Lower your eyes in respect",
-      {"prefix": "Lower your eyes and turn to"}
+      "Lower your eyes and turn to face it",
+      "Lower your eyes in respect"
     ],
     [
       "Head deeper into the forest"
