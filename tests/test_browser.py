@@ -260,7 +260,8 @@ class BrowserFlow(unittest.TestCase):
     def exercise_latest_recording(self, resumed=False, red=False, ending_pages=2,
                                   shadow_option=False, cooldown=True, direct_play=False, known_narrative=False,
                                   resume_scene=0, transparent_future=False, delayed_shadow=False, unknown_resume=False,
-                                  role_only_continue=False):
+                                  role_only_continue=False, staggered_valley=False, hidden_shadow=False,
+                                  never_reveal_valley=False):
         account = ROUTE['accounts'][0]
         context = self.browser.new_context()
         requests, selected = [], []
@@ -273,7 +274,11 @@ class BrowserFlow(unittest.TestCase):
         if unknown_resume:
             rows[resume_scene] = 'Unrecorded detour'
         entry = 'Continue your story' if resumed else 'Brave Threshing'
-        play_html = '''<html><body><script>
+        play_html = '''<html><head><style>
+            @keyframes recorded-step-in {0%{opacity:0;visibility:hidden;translate:0 6px}100%{opacity:1;visibility:visible;translate:0 0}}
+            .late-option {animation:recorded-step-in .05s linear both}
+            form#choices:not(:has(:checked)) + button[data-choices-submit] {display:none}
+            </style></head><body><script>
             const rows=ROWS; let scene=START_SCENE; const endingPages=ENDING;
             function appendFuture() {
                 if(TRANSPARENT_FUTURE) document.body.insertAdjacentHTML('beforeend', '<div style="opacity:0"><label for="choice-future-a">Help your squadmate</label><label for="choice-future-b">Investigate the scream</label></div>');
@@ -293,18 +298,27 @@ class BrowserFlow(unittest.TestCase):
                 } else {
                     let options=[label, 'Another choice'];
                     if(SHADOW && scene===16) options.push('Follow the shadow');
+                    if(STAGGERED_VALLEY && scene===2) options=['Enter the valley with two of your squadmates', 'Enter the valley with three of your squadmates', label];
                     document.body.innerHTML=`<p>Scene ${scene}</p><form id="choices" onsubmit="event.preventDefault();const input=this.querySelector(':checked');if(input){captureChoice(this.querySelector('label[for='+input.id+']').textContent);next()}">`+
-                      options.map((text,i)=>`<input hidden type="radio" required name="choice" id="choice-${i}" value="${i}"><label for="choice-${i}">${text}</label>`).join('')+
+                      options.map((text,i)=>`<div class="choice ${STAGGERED_VALLEY && scene===2 && i>0 ? 'late-option' : ''}" style="animation-delay:${i*.15}s"><input hidden type="radio" required name="choice" id="choice-${i}" value="${i}"><label for="choice-${i}">${text}</label></div>`).join('')+
                       '</form><button data-choices-submit form="choices">Next Scene</button>';
+                    if(NEVER_REVEAL_VALLEY && scene===2) {
+                        const option=document.querySelector('label[for="choice-2"]').parentElement;
+                        option.classList.remove('late-option');option.style.visibility='hidden';
+                    }
                     if(DELAYED_SHADOW && scene===16) {
                         const shadow=document.querySelector('label[for="choice-2"]');
                         shadow.style.opacity='0';setTimeout(()=>shadow.style.opacity='1', 150);
+                    }
+                    if(HIDDEN_SHADOW && scene===16) {
+                        const shadow=document.querySelector('label[for="choice-2"]');
+                        shadow.style.visibility='hidden';setTimeout(()=>shadow.style.visibility='visible', 150);
                     }
                 }
                 appendFuture();
             }
             function next(){scene++;draw()} draw();
-            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future))
+            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('HIDDEN_SHADOW', json.dumps(hidden_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future)).replace('STAGGERED_VALLEY', json.dumps(staggered_valley)).replace('NEVER_REVEAL_VALLEY', json.dumps(never_reveal_valley))
         if role_only_continue:
             play_html = play_html.replace('data-page-next', '')
         def site(route):
@@ -443,6 +457,34 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
         self.assertFalse(state['global_pause'])
         self.assertEqual(selected, [])
+
+    def test_resumed_valley_waits_for_solo_option_after_squadmate_options_reveal(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, staggered_valley=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(selected[0], 'Enter the valley alone')
+        self.assertNotIn('Enter the valley with two of your squadmates', selected)
+
+    def test_fresh_valley_waits_for_the_same_staggered_choice_reveal(self):
+        state, _, selected, _ = self.exercise_latest_recording(staggered_valley=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertEqual(selected[0], 'Enter the valley alone')
+
+    def test_wait_for_visibility_hidden_shadow_before_tree_selection(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=16,
+                                                             shadow_option=True, hidden_shadow=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(selected, [])
+
+    def test_missing_solo_option_times_out_without_taking_squadmate_route(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, staggered_valley=True,
+                                                             never_reveal_valley=True)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertIn('TimeoutError', record['reason'])
+        self.assertEqual(selected, [])
+        options = {row['text']: row for row in record['story_diagnostic']['controls']}
+        self.assertEqual(options['Enter the valley alone']['visibility'], 'hidden')
 
     def test_unknown_resumed_choice_saves_actual_options_and_controlled_reason(self):
         state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=4, unknown_resume=True)

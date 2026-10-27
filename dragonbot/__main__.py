@@ -130,8 +130,9 @@ def story_control_snapshot(page, controls=None):
     return controls.evaluate_all("""(elements) => {
         const painted = """ + PAINTED_ELEMENT_JS + """;
         return elements.map((element, index) => ({
-            index, tag: element.tagName, text: element.innerText.trim(),
+            index, tag: element.tagName, text: (element.innerText.trim() || element.textContent || '').trim(),
             control: element.tagName === 'LABEL' ? element.getAttribute('for') : null,
+            visibility: getComputedStyle(element).visibility,
             painted: painted(element)
         }));
     }""")
@@ -153,10 +154,17 @@ def read_story_controls(page):
         label = story_controls(page).nth(labels[0]['index'])
         group = label.evaluate_handle("(element) => element.control?.form || element.closest('form') || element.parentElement")
         try:
+            pending = group.evaluate("""(group) => {
+                const painted = """ + PAINTED_ELEMENT_JS + """;
+                return [...group.querySelectorAll('label[for^="choice-"]')].filter(element => !painted(element)).length;
+            }""")
+            if pending:
+                print(f'Waiting for {pending} more story option(s) to reveal; maximum wait {page_timeout_ms() // 1000}s.', flush=True)
             page.wait_for_function("""(group) => {
                 const painted = """ + PAINTED_ELEMENT_JS + """;
-                const labels = [...group.querySelectorAll('label[for^="choice-"]')].filter(element =>
-                    element.getClientRects().length && getComputedStyle(element).visibility === 'visible');
+                // Animation-delayed options start with visibility:hidden. They still
+                // belong to this choice group and must participate in the wait.
+                const labels = [...group.querySelectorAll('label[for^="choice-"]')];
                 return labels.length > 0 && labels.every(painted);
             }""", arg=group)
         finally:
@@ -169,7 +177,7 @@ def story_page_status(page):
     try:
         path = urlsplit(page.url).path
         return {'path': path if path in ('/rotunda', '/archway', '/play') else '[other]',
-                'controls': [row for row in story_control_snapshot(page, page.locator('a, button, label[for^="choice-"]').filter(visible=True))
+                'controls': [row for row in story_control_snapshot(page, page.locator('a, button, label[for^="choice-"]'))
                              if row['tag'] in ('A', 'BUTTON', 'LABEL')]}
     except Exception:
         return {'available': False}
