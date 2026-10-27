@@ -264,7 +264,7 @@ def click_transition(page, target):
     before = page.locator('body').inner_text()
     url = page.url
     target.click()
-    page.wait_for_function('(old) => document.body.innerText !== old.text || location.href !== old.url',
+    page.wait_for_function('(old) => location.href !== old.url || (document.body && document.body.innerText !== old.text)',
                            arg={'text': before, 'url': url})
     # Missing or ambiguous choices after a transition fail closed.
     page.wait_for_load_state('domcontentloaded')

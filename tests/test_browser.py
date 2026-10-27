@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status, story_page_status
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status, story_page_status, click_transition
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -154,6 +154,62 @@ class BrowserFlow(unittest.TestCase):
                 self.assertEqual(page.locator('#next-reader').input_value(), 'one@gmail.com')
         finally:
             context.close()
+
+    def test_navigation_wait_handles_a_new_document_without_a_body(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+        import time
+
+        class Site(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self, body, content_type='text/html'):
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def do_GET(self):
+                if self.path == '/slow.js':
+                    # Simulate a parser-blocking asset; the new document has no body yet.
+                    time.sleep(.3)
+                    self.respond('window.parserReady=true;', 'application/javascript')
+                elif self.path == '/archway':
+                    self.respond('<html><head><script src="/slow.js"></script></head><body><h1>Your assignment, Cadet</h1><button>Brave Threshing</button></body></html>')
+                elif self.path == '/play':
+                    self.respond('<form method="post" action="/play"><button>Next Scene</button></form>')
+                else:
+                    self.respond('<a href="/archway">Brave Threshing</a>')
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                self.respond('<html><head><script src="/slow.js"></script></head><body><h1>Next scene</h1><button>Continue</button></body></html>')
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Site)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(3000)
+            base = f'http://127.0.0.1:{server.server_port}'
+            with self.subTest(navigation='Rotunda link to Archway'):
+                page.goto(base + '/')
+                click_transition(page, page.get_by_role('link', name='Brave Threshing'))
+                self.assertTrue(page.get_by_role('button', name='Brave Threshing').is_visible())
+                self.assertTrue(page.evaluate('window.parserReady'))
+            with self.subTest(navigation='POST keeps the same /play URL'):
+                page.goto(base + '/play')
+                click_transition(page, page.get_by_role('button', name='Next Scene'))
+                self.assertEqual(page.url, base + '/play')
+                self.assertTrue(page.get_by_role('button', name='Continue').is_visible())
+                self.assertTrue(page.evaluate('window.parserReady'))
+        finally:
+            context.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_visible_email_skips_welcome_button(self):
         context = self.browser.new_context()
