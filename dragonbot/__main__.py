@@ -210,23 +210,56 @@ def execute_choice(page, selection):
     click_transition(page, submit)
 
 
-def complete_mfa(page, code, allow_existing_session=False):
+def report_login_progress(stage, progress=None):
+    if progress is not None:
+        progress(stage)
+    print(f'Login: {stage}.', flush=True)
+
+
+def login_page_status(page):
+    # Inspect structure only: never collect input values, body text, tokens, or query strings.
+    try:
+        path = urlsplit(page.url).path
+        controls = {
+            'email': login_locator(page, 'EMAIL_SELECTOR'),
+            'verification_code': login_locator(page, 'MFA_SELECTOR'),
+            'brave_threshing_link': login_locator(page, 'AUTH_READY_SELECTOR'),
+            'cooldown': page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label'),
+            'profile': page.locator('button[popovertarget="profile"]'),
+            'brave_threshing_button': page.get_by_role('button', name='Brave Threshing', exact=True),
+            'story_choices': page.locator('form#choices label[for^="choice-"]'),
+        }
+        return {
+            'path': path if path in ('/', '/enter', '/code', '/rotunda', '/archway', '/play') else '[other]',
+            'document_ready': page.evaluate('document.readyState'),
+            'controls': {name: {'matches': locator.count(), 'visible': locator.filter(visible=True).count() > 0}
+                         for name, locator in controls.items()},
+        }
+    except Exception:
+        return {'available': False}
+
+
+def complete_mfa(page, code, allow_existing_session=False, progress=None):
+    report_login_progress('entering the verification code', progress)
     field = login_locator(page, 'MFA_SELECTOR')
     field.fill('')
     # Real typing emits input and keyboard events used by auto-submit forms.
     field.press_sequentially(code)
     if os.environ.get('MFA_AUTO_SUBMIT', 'true').lower() == 'false':
         page.locator(os.environ['MFA_SUBMIT_SELECTOR']).click()
-    return confirm_login(page, allow_existing_session=allow_existing_session)
+    return confirm_login(page, allow_existing_session=allow_existing_session, progress=progress)
 
 
-def confirm_login(page, allow_existing_session=False):
+def confirm_login(page, allow_existing_session=False, progress=None):
     # The URL alone never proves authentication; require a logged-in UI marker.
+    report_login_progress('waiting for the verification form to close', progress)
     login_locator(page, 'MFA_SELECTOR').wait_for(state='hidden')
     recorded = os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded'
     authenticated_paths = ('/rotunda', '/archway', '/play')
     if recorded and urlsplit(page.url).path not in authenticated_paths:
+        report_login_progress('opening Rotunda after verification', progress)
         page.goto('https://dragonkind.com/rotunda', wait_until='domcontentloaded')
+    report_login_progress('waiting for authenticated page controls', progress)
     ready = login_locator(page, 'AUTH_READY_SELECTOR')
     if not (recorded and allow_existing_session):
         ready.wait_for(state='visible')
@@ -305,6 +338,7 @@ def account_ready_for_story(page, route, state, account, login_status):
     cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
     # Profile can appear before the animated ready/cooldown panel; wait for that panel.
     if login_status == 'authenticated':
+        print('Login confirmed; waiting for Brave Threshing or the site cooldown panel.', flush=True)
         ready.or_(cooldown).filter(visible=True).first.wait_for(state='visible')
     if cooldown.is_visible():
         record = state['accounts'][account]
@@ -340,6 +374,7 @@ def alert(state, account, reason, page=None, global_pause=True):
                   pause_scope='global' if global_pause else 'account')
     state['global_pause'] = state['global_pause'] or global_pause
     save_state(STATE, state)  # Persist the pause even if screenshot or mail fails.
+    print(f'Paused {account}: {reason}. Scope: {record["pause_scope"]}.', flush=True)
     if page is not None:
         try:
             page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
@@ -361,7 +396,11 @@ def play(browser, route, state, account, restart_browser=None):
     page = context.new_page()
     configure_page(page)
     authenticated = False
+    story_started = False
     phase = 'loading the page'
+    def login_progress(stage):
+        nonlocal phase
+        phase = stage
     def restart_login_page():
         nonlocal context, page
         context.close()
@@ -374,6 +413,7 @@ def play(browser, route, state, account, restart_browser=None):
         return page
     try:
         record.update(status='active', step=0)
+        record.pop('login_diagnostic', None)
         save_state(STATE, state)
         print(f'Loading Dragonkind; waiting up to {page_timeout_ms() // 1000}s for login controls.', flush=True)
         page.goto('https://dragonkind.com', wait_until='domcontentloaded')
@@ -393,10 +433,13 @@ def play(browser, route, state, account, restart_browser=None):
             phase = 'waiting for the verification email'
             code = wait_code(client, boundary, account)
         phase = 'completing login'
-        login_status = complete_mfa(page, code, allow_existing_session=True)
+        login_status = complete_mfa(page, code, allow_existing_session=True, progress=login_progress)
         authenticated = True
+        print(f'Login confirmed ({login_status}) for {account}.', flush=True)
+        phase = 'checking the story start or cooldown panel'
         if not account_ready_for_story(page, route, state, account, login_status):
             return
+        story_started = True
         phase = 'following the story route'
         for index, options in enumerate(route['steps']):
             record['step'] = index
@@ -423,6 +466,9 @@ def play(browser, route, state, account, restart_browser=None):
         save_state(STATE, state)
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)
     except Exception as error:
+        if not story_started:
+            record['login_diagnostic'] = login_page_status(page)
+            print('Login page diagnostic: ' + json.dumps(record['login_diagnostic']), flush=True)
         # Exception text can include sensitive DOM/input values; retain only its class.
         detail = f'{type(error).__name__}; {error}' if isinstance(error, LoginRequestRejected) else type(error).__name__
         alert(state, account, f'Failure while {phase} ({detail})',
@@ -481,6 +527,7 @@ def run(headless=True, retry_rejected=False):
                     continue
                 run_account(playwright, route, state, account, headless=headless)
                 if state['global_pause']:
+                    print('Global pause is active; the remaining accounts have not been started. Review data/state.json.', flush=True)
                     break
             if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
                 print('All configured accounts are paused; review saved state.', flush=True)
@@ -585,6 +632,7 @@ def replay_login(account, automatic=False):
                 print('Browser closed before login confirmation; test cancelled. Email delivery may still have succeeded.', flush=True)
                 return False
             print(f'Login test stopped ({type(error).__name__}); no game choices were made.', flush=True)
+            print('Login page diagnostic: ' + json.dumps(login_page_status(page)), flush=True)
             return False
         except LoginRequestRejected as error:
             print(f'Login test rejected: {error}. No game choices were made.', flush=True)

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -568,6 +568,66 @@ class BrowserFlow(unittest.TestCase):
                 self.assertFalse(page.locator('#choice-0').is_checked())
         finally:
             context.close()
+
+    def test_login_diagnostic_excludes_codes_tokens_and_query_strings(self):
+        context = self.browser.new_context()
+        try:
+            context.route('https://dragonkind.com/**', lambda route: route.fulfill(content_type='text/html', body=
+                '<label for="code">Six-character code</label><input id="code" value="SECRET_CODE">'
+                '<input type="hidden" name="_csrf_token" value="SECRET_TOKEN"><span class="cell">SECRET_CELL</span>'))
+            page = context.new_page()
+            page.goto('https://dragonkind.com/code?token=SECRET_QUERY#SECRET_FRAGMENT')
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded'}):
+                diagnostic = login_page_status(page)
+            self.assertEqual(diagnostic['path'], '/code')
+            self.assertTrue(diagnostic['controls']['verification_code']['visible'])
+            self.assertFalse(diagnostic['controls']['brave_threshing_link']['visible'])
+            self.assertNotIn('SECRET', json.dumps(diagnostic))
+        finally:
+            context.close()
+
+    def exercise_login_timeout(self, verify_code):
+        context = self.browser.new_context()
+        def site(route):
+            if route.request.method == 'POST':
+                action = 'oninput="if(this.value.length===6)location.href=\'/rotunda\'"' if verify_code else ''
+                body = f'<label for="code">Six-character code</label><input id="code" {action}>'
+            elif route.request.url.endswith('/rotunda'):
+                body = '<button popovertarget="profile">Profile</button><div id="profile" popover></div>'
+            else:
+                body = '<form method="post" action="/enter"><label for="email">Email Address</label><input id="email" name="reader"><button aria-label="Send me a code">→</button></form>'
+            route.fulfill(content_type='text/html', body=body)
+        context.route('https://dragonkind.com/**', site)
+        browser = MagicMock()
+        browser.new_context.return_value = context
+        account = ROUTE['accounts'][0]
+        state = {'accounts': {}, 'global_pause': False}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'LOGIN_EMAIL_CASE': 'original',
+                                        'PAGE_LOAD_TIMEOUT_SECONDS': '1', 'MFA_AUTO_SUBMIT': 'true'}), \
+                 patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
+                 patch('dragonbot.__main__.inbox'), \
+                 patch('dragonbot.__main__.highwater', return_value=42), \
+                 patch('dragonbot.__main__.wait_code', return_value='ABC123'), \
+                 patch('dragonbot.__main__.notify'), \
+                 patch('playwright.sync_api.Page.screenshot'):
+                play(browser, ROUTE, state, account)
+                saved = json.loads((Path(directory) / 'state.json').read_text())
+        self.assertTrue(saved['global_pause'])
+        self.assertNotIn('ABC123', json.dumps(saved))
+        return saved['accounts'][account]
+
+    def test_verification_timeout_identifies_code_form_stage(self):
+        record = self.exercise_login_timeout(verify_code=False)
+        self.assertEqual(record['reason'], 'Failure while waiting for the verification form to close (TimeoutError)')
+        self.assertTrue(record['login_diagnostic']['controls']['verification_code']['visible'])
+
+    def test_rotunda_panel_timeout_is_not_reported_as_failed_mfa(self):
+        record = self.exercise_login_timeout(verify_code=True)
+        self.assertEqual(record['reason'], 'Failure while checking the story start or cooldown panel (TimeoutError)')
+        self.assertEqual(record['login_diagnostic']['path'], '/rotunda')
+        self.assertTrue(record['login_diagnostic']['controls']['profile']['visible'])
+        self.assertFalse(record['login_diagnostic']['controls']['verification_code']['visible'])
 
     def test_account_with_site_cooldown_is_saved_signed_out_and_skipped(self):
         context = self.browser.new_context()
