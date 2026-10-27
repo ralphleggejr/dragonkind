@@ -33,16 +33,20 @@ def choose(labels, alternatives, allow_contains=False):
     return matches[0]
 
 
+class StoryPositionError(RuntimeError):
+    """A controlled story-inspection explanation, safe to include in logs."""
+
+
 def locate_story_step(labels, steps):
     candidates = []
     for index, alternatives in enumerate(steps[2:], 2):
         matches = matching_choices(labels, alternatives)
         if len(matches) > 1:
-            raise RuntimeError('Multiple options match a recorded story step')
+            raise StoryPositionError('Multiple options match a recorded story step')
         if matches:
             candidates.append(index)
     if len(candidates) != 1:
-        raise RuntimeError('Cannot uniquely identify the current story step')
+        raise StoryPositionError('Cannot uniquely identify the current story step')
     return candidates[0]
 
 

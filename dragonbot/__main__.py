@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
-from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures
+from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError
 from .mail import highwater, inbox, notify, wait_code
 
 STATE = Path('data/state.json')
@@ -108,9 +108,71 @@ def story_controls(page):
     controls = page.locator(os.environ['CHOICES_SELECTOR'])
     if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
         for role, name in (('link', 'Brave Threshing'), ('button', 'Brave Threshing'),
-                           ('link', 'Continue your story'), ('button', 'Continue your story')):
+                           ('link', 'Continue your story'), ('button', 'Continue your story'),
+                           ('button', 'Continue')):
             controls = controls.or_(page.get_by_role(role, name=name, exact=True))
     return controls.filter(visible=True)
+
+
+PAINTED_ELEMENT_JS = """(element) => {
+    if (!element?.isConnected || !element.getClientRects().length) return false;
+    for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.visibility !== 'visible' || style.display === 'none' ||
+            Number(style.opacity) <= 0 || node.hidden || node.inert) return false;
+    }
+    return true;
+}"""
+
+
+def story_control_snapshot(page, controls=None):
+    controls = story_controls(page) if controls is None else controls
+    return controls.evaluate_all("""(elements) => {
+        const painted = """ + PAINTED_ELEMENT_JS + """;
+        return elements.map((element, index) => ({
+            index, tag: element.tagName, text: element.innerText.trim(),
+            control: element.tagName === 'LABEL' ? element.getAttribute('for') : null,
+            painted: painted(element)
+        }));
+    }""")
+
+
+def read_story_controls(page):
+    if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
+        # Re-evaluate live DOM/styles: layout visibility alone also includes opacity:0.
+        page.wait_for_function("""() => {
+            const painted = """ + PAINTED_ELEMENT_JS + """;
+            return [...document.querySelectorAll('label[for^="choice-"], button, a')].some(element =>
+                painted(element) && (element.matches('label[for^="choice-"]') ||
+                ['continue', 'brave threshing', 'continue your story'].includes(element.innerText.trim().toLowerCase())));
+        }""")
+    rows = [row for row in story_control_snapshot(page) if row['painted']]
+    labels = [row for row in rows if row['tag'] == 'LABEL']
+    if labels:
+        # Each choice can reveal separately. Include every current option in shadow checks.
+        label = story_controls(page).nth(labels[0]['index'])
+        group = label.evaluate_handle("(element) => element.control?.form || element.closest('form') || element.parentElement")
+        try:
+            page.wait_for_function("""(group) => {
+                const painted = """ + PAINTED_ELEMENT_JS + """;
+                const labels = [...group.querySelectorAll('label[for^="choice-"]')].filter(element =>
+                    element.getClientRects().length && getComputedStyle(element).visibility === 'visible');
+                return labels.length > 0 && labels.every(painted);
+            }""", arg=group)
+        finally:
+            group.dispose()
+        rows = [row for row in story_control_snapshot(page) if row['painted']]
+    return rows
+
+
+def story_page_status(page):
+    try:
+        path = urlsplit(page.url).path
+        return {'path': path if path in ('/rotunda', '/archway', '/play') else '[other]',
+                'controls': [row for row in story_control_snapshot(page, page.locator('a, button, label[for^="choice-"]').filter(visible=True))
+                             if row['tag'] in ('A', 'BUTTON', 'LABEL')]}
+    except Exception:
+        return {'available': False}
 
 
 def prepare_login(page):
@@ -388,9 +450,10 @@ def inspect_resumed_story(page, route, state, account):
         story_controls(page).or_(result).or_(terminal).first.wait_for(state='visible')
         if terminal.count():
             return len(route['steps'])
-        choices = page.locator('label[for^="choice-"]').filter(visible=True)
-        if choices.count():
-            labels = choices.all_inner_texts()
+        rows = read_story_controls(page)
+        choices = [row for row in rows if row['tag'] == 'LABEL']
+        if choices:
+            labels = [row['text'] for row in choices]
             index = locate_story_step(labels, route['steps'])
             state['accounts'][account]['step'] = index
             save_state(STATE, state)
@@ -400,14 +463,17 @@ def inspect_resumed_story(page, route, state, account):
                 return None
             print(f'Resuming at story step {index + 1}, identified from the visible choices.', flush=True)
             return index
-        if result.count():
+        results = [row for row in story_control_snapshot(page, result) if row['painted']]
+        if results:
             finish_recorded_ending(page, route, state, account, allow_partial=True)
             return None
-        onward = page.get_by_role('button', name='Continue', exact=True).filter(visible=True)
-        if revealed == 3 or onward.count() != 1:
-            raise RuntimeError('Cannot identify the resumed story within three Continue pages')
+        onward_rows = [row for row in rows if row['tag'] == 'BUTTON' and normalized(row['text']) == 'continue']
+        if revealed == 3 or len(onward_rows) != 1:
+            raise StoryPositionError('Cannot identify the resumed story within three Continue pages')
+        onward = story_controls(page).nth(onward_rows[0]['index'])
+        print(f'Resumed story: revealing Continue page {revealed + 1}/3.', flush=True)
         click_transition(page, onward)
-    raise RuntimeError('Cannot identify the resumed story')
+    raise StoryPositionError('Cannot identify the resumed story')
 
 
 def finish_recorded_ending(page, route, state, account, allow_partial=False):
@@ -415,18 +481,19 @@ def finish_recorded_ending(page, route, state, account, allow_partial=False):
     # The site's actual cooldown panel, rather than these buttons, proves completion.
     record = state['accounts'][account]
     for count in range(4):
-        onward = page.get_by_role('button', name='Continue', exact=True).filter(visible=True)
         result = page.get_by_role('link', name='Continue', exact=True).filter(visible=True)
-        choices = page.locator('label[for^="choice-"]').filter(visible=True)
-        onward.or_(result).or_(choices).first.wait_for(state='visible')
-        if choices.count():
-            raise RuntimeError('Unexpected choice during the recorded ending')
-        if result.count():
-            if (not allow_partial and count not in (2, 3)) or result.count() != 1 or onward.count():
-                raise RuntimeError('Unrecognized recorded ending')
+        rows = read_story_controls(page)
+        onward_rows = [row for row in rows if row['tag'] == 'BUTTON' and normalized(row['text']) == 'continue']
+        if any(row['tag'] == 'LABEL' for row in rows):
+            raise StoryPositionError('Unexpected choice during the recorded ending')
+        result_rows = [row for row in story_control_snapshot(page, result) if row['painted']]
+        if result_rows:
+            if (not allow_partial and count not in (2, 3)) or len(result_rows) != 1 or onward_rows:
+                raise StoryPositionError('Unrecognized recorded ending')
+            result = result.nth(result_rows[0]['index'])
             target = urlsplit(urljoin(page.url, result.get_attribute('href') or ''))
             if target.scheme != 'https' or target.hostname != 'dragonkind.com' or target.path != '/rotunda':
-                raise RuntimeError('Recorded result link must lead to Rotunda')
+                raise StoryPositionError('Recorded result link must lead to Rotunda')
             wait_rendered(page, result)
             click_transition(page, result)
             cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
@@ -439,8 +506,9 @@ def finish_recorded_ending(page, route, state, account, allow_partial=False):
             save_state(STATE, state)
             print(f'Recorded ending and site cooldown confirmed for {account}; cooldown is four hours.', flush=True)
             return
-        if count == 3 or onward.count() != 1:
-            raise RuntimeError('Recorded ending exceeded its allowed Continue pages')
+        if count == 3 or len(onward_rows) != 1:
+            raise StoryPositionError('Recorded ending exceeded its allowed Continue pages')
+        onward = story_controls(page).nth(onward_rows[0]['index'])
         record['step'] = len(route['steps']) + count
         save_state(STATE, state)
         wait_rendered(page, onward)
@@ -505,6 +573,7 @@ def play(browser, route, state, account, restart_browser=None):
     try:
         record.update(status='active', step=0)
         record.pop('login_diagnostic', None)
+        record.pop('story_diagnostic', None)
         save_state(STATE, state)
         print(f'Loading Dragonkind; waiting up to {page_timeout_ms() // 1000}s for login controls.', flush=True)
         page.goto('https://dragonkind.com', wait_until='domcontentloaded')
@@ -554,8 +623,8 @@ def play(browser, route, state, account, restart_browser=None):
             wait_story_ready(page)
             if finish_known_death_pages(page):
                 break
-            controls = story_controls(page)
-            labels = controls.all_inner_texts()
+            rows = read_story_controls(page)
+            labels = [row['text'] for row in rows]
             if index == route['shadow_checkpoint'] and shadow(labels):
                 alert(state, account, 'A story option mentions shadow', page,
                       os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
@@ -564,7 +633,7 @@ def play(browser, route, state, account, restart_browser=None):
             print(f'Story step {index + 1}: {labels[selection].strip()}', flush=True)
             if index < 2 and normalized(labels[selection]) == 'continue your story':
                 resume_pending = True
-            execute_choice(page, controls.nth(selection))
+            execute_choice(page, story_controls(page).nth(rows[selection]['index']))
             index += 1
         wait_story_ready(page)
         if not visible(page, 'DEATH_SELECTOR').count():
@@ -586,8 +655,11 @@ def play(browser, route, state, account, restart_browser=None):
         if not story_started:
             record['login_diagnostic'] = login_page_status(page)
             print('Login page diagnostic: ' + json.dumps(record['login_diagnostic']), flush=True)
+        else:
+            record['story_diagnostic'] = story_page_status(page)
+            print('Story page diagnostic: ' + json.dumps(record['story_diagnostic']), flush=True)
         # Exception text can include sensitive DOM/input values; retain only its class.
-        detail = f'{type(error).__name__}; {error}' if isinstance(error, LoginRequestRejected) else type(error).__name__
+        detail = f'{type(error).__name__}; {error}' if isinstance(error, (LoginRequestRejected, StoryPositionError)) else type(error).__name__
         alert(state, account, f'Failure while {phase} ({detail})',
               page if authenticated or isinstance(error, LoginRequestRejected) else None)
     finally:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status, story_page_status
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -259,7 +259,8 @@ class BrowserFlow(unittest.TestCase):
 
     def exercise_latest_recording(self, resumed=False, red=False, ending_pages=2,
                                   shadow_option=False, cooldown=True, direct_play=False, known_narrative=False,
-                                  resume_scene=0):
+                                  resume_scene=0, transparent_future=False, delayed_shadow=False, unknown_resume=False,
+                                  role_only_continue=False):
         account = ROUTE['accounts'][0]
         context = self.browser.new_context()
         requests, selected = [], []
@@ -269,15 +270,21 @@ class BrowserFlow(unittest.TestCase):
         rows[4] = 'Lower your eyes in respect' if red else 'Lower your eyes and turn to leave'
         rows[16] = 'Climb down slowly to pursue the sound'
         rows[19] = 'Lower your eyes but keep your head high'
+        if unknown_resume:
+            rows[resume_scene] = 'Unrecorded detour'
         entry = 'Continue your story' if resumed else 'Brave Threshing'
         play_html = '''<html><body><script>
             const rows=ROWS; let scene=START_SCENE; const endingPages=ENDING;
+            function appendFuture() {
+                if(TRANSPARENT_FUTURE) document.body.insertAdjacentHTML('beforeend', '<div style="opacity:0"><label for="choice-future-a">Help your squadmate</label><label for="choice-future-b">Investigate the scream</label></div>');
+            }
             function draw() {
                 if(scene >= rows.length) {
                     document.body.innerHTML = scene < rows.length+endingPages
                       ? `<p>Recorded ending page ${scene-rows.length+1}</p><button data-page-next onclick="next()">Continue</button>`
                       : '<p>End of attempt</p><a class="onward" href="/rotunda">Continue</a>';
                     if(KNOWN_NARRATIVE && scene===rows.length) document.body.insertAdjacentHTML('afterbegin', '<strong class="display">Sometimes they don’t.</strong>');
+                    appendFuture();
                     return;
                 }
                 let label=rows[scene];
@@ -289,10 +296,17 @@ class BrowserFlow(unittest.TestCase):
                     document.body.innerHTML=`<p>Scene ${scene}</p><form id="choices" onsubmit="event.preventDefault();const input=this.querySelector(':checked');if(input){captureChoice(this.querySelector('label[for='+input.id+']').textContent);next()}">`+
                       options.map((text,i)=>`<input hidden type="radio" required name="choice" id="choice-${i}" value="${i}"><label for="choice-${i}">${text}</label>`).join('')+
                       '</form><button data-choices-submit form="choices">Next Scene</button>';
+                    if(DELAYED_SHADOW && scene===16) {
+                        const shadow=document.querySelector('label[for="choice-2"]');
+                        shadow.style.opacity='0';setTimeout(()=>shadow.style.opacity='1', 150);
+                    }
                 }
+                appendFuture();
             }
             function next(){scene++;draw()} draw();
-            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene))
+            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future))
+        if role_only_continue:
+            play_html = play_html.replace('data-page-next', '')
         def site(route):
             from urllib.parse import urlsplit
             path = urlsplit(route.request.url).path
@@ -413,6 +427,46 @@ class BrowserFlow(unittest.TestCase):
         state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=22)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
         self.assertEqual(selected, [])
+
+    def test_resume_ignores_transparent_future_options_during_continue_pages(self):
+        state, _, _, _ = self.exercise_latest_recording(resumed=True, transparent_future=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+        self.assertFalse(state['global_pause'])
+
+    def test_resume_accepts_recorded_continue_role_without_old_css_attributes(self):
+        state, _, _, _ = self.exercise_latest_recording(resumed=True, role_only_continue=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
+
+    def test_resume_waits_for_delayed_shadow_option_before_choosing(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=16,
+                                                             shadow_option=True, delayed_shadow=True)
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(selected, [])
+
+    def test_unknown_resumed_choice_saves_actual_options_and_controlled_reason(self):
+        state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=4, unknown_resume=True)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertIn('Cannot uniquely identify the current story step', record['reason'])
+        self.assertIn('Unrecorded detour', [row['text'] for row in record['story_diagnostic']['controls']])
+        self.assertEqual(selected, [])
+
+    def test_story_diagnostic_excludes_input_values_and_link_tokens(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content('<input value="SECRET_CODE"><input type="hidden" value="SECRET_TOKEN">'
+                             '<a href="/rotunda?token=SECRET_QUERY">Rotunda</a>'
+                             '<label for="choice-0">A visible option</label>'
+                             '<label style="opacity:0" for="choice-1">A future option</label>')
+            diagnostic = story_page_status(page)
+            self.assertNotIn('SECRET', json.dumps(diagnostic))
+            rows = {row['text']: row for row in diagnostic['controls']}
+            self.assertTrue(rows['A visible option']['painted'])
+            self.assertFalse(rows['A future option']['painted'])
+        finally:
+            context.close()
 
     def test_hidden_result_does_not_confirm_death(self):
         context = self.browser.new_context()
