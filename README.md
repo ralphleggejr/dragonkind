@@ -1,6 +1,6 @@
 # Dragonkind automation
 
-Dockerized Python/Playwright runner for seven active accounts. **Native Mac automation has completed one account in live testing; the full rotation and Docker login still need validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+Dockerized Python/Playwright runner for eight active accounts. **Native Mac automation has completed one account in live testing; the full rotation and Docker login still need validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
 
 ## Behavior
 
@@ -63,7 +63,7 @@ SHADOW_PAUSE_SCOPE=account
 
 Replace the example password locally with your Google app password, not your regular Gmail password. Do not paste credentials in chat, commit them, or share `.env`. The project excludes `.env` from Git and the Docker build context. Google two-step verification and account permission to use app passwords are required; this prototype does not implement OAuth. IMAP and authenticated SMTP access must be allowed. Gmail authentication and forwarded-code retrieval have succeeded in user testing.
 
-Configure forwarding from each of your other six active Gmail inboxes to `rljr.code@gmail.com`, preferably filtered to Dragonkind verification messages. Complete Gmail's forwarding confirmation. The `rljr.code@gmail.com` account already receives its own login messages directly. Preserve the original sender and recipient when forwarding; stripped-down code-only messages are not supported.
+Configure forwarding from each of your other seven Gmail inboxes to `rljr.code@gmail.com`, preferably filtered to Dragonkind verification messages. Complete Gmail's forwarding confirmation. The `rljr.code@gmail.com` account already receives its own login messages directly. Preserve the original sender and recipient when forwarding; stripped-down code-only messages are not supported.
 
 Required live-site configuration:
 
@@ -248,11 +248,11 @@ This launcher installs native Playwright and python-dotenv in `.venv`, opens vis
 
 The manual replay now reports user-closed windows as a cancelled test instead of a TargetClosedError traceback. Navigation to the recorded Rotunda URL happens only when the code field has disappeared and the browser has not already reached Rotunda, Archway, or Play; authenticated UI markers are still required. If you manually click through while replay is waiting, it can recognize authenticated game UI, but it never clicks those story controls itself.
 
-## Run the seven active accounts in the verified Mac browser mode
+## Run all eight accounts in the verified Mac browser mode
 
-`route.json` lists these seven active addresses in rotation order: `ralphleggejr.apple@gmail.com`, `leggetechsolutions@gmail.com`, `leggefamilyco@gmail.com`, `rljr.code@gmail.com`, `rlegge.code@gmail.com`, `leggejr.co@gmail.com`, and `10249southlawncir@gmail.com`.
+`route.json` lists all eight addresses in rotation order: `ralphleggejr@gmail.com`, `ralphleggejr.apple@gmail.com`, `leggetechsolutions@gmail.com`, `leggefamilyco@gmail.com`, `rljr.code@gmail.com`, `rlegge.code@gmail.com`, `leggejr.co@gmail.com`, and `10249southlawncir@gmail.com`.
 
-`ralphleggejr@gmail.com` is temporarily excluded. Its saved state and cooldown remain in `data/state.json`, but its pause does not block the active rotation. The first active account is now `ralphleggejr.apple@gmail.com`. Re-adding the excluded account also restores the effect of any unresolved pause it still has.
+`ralphleggejr@gmail.com` is restored as the first account. An old saved login pause for this account must be cleared locally before restarting; see the restart commands below. Expired cooldowns become eligible automatically. Existing future cooldown deadlines and other accounts' shadow pauses are preserved.
 
 If your local `route.json` still has the single-account test configuration, preserve that edit in a Git stash before pulling the current account file. Keep the stash; do not pop it over the new configuration:
 
@@ -264,7 +264,7 @@ git pull --ff-only
 bash scripts/run-mac.sh --retry-login-errors
 ```
 
-The launcher reads your local `.env` and runs the full scheduler with native **visible Chromium**, matching the login/MFA test that succeeded on your Mac. It uses recorded login actions and the configured email's original case. It runs one account at a time, obtains each account's MFA from the `rljr.code@gmail.com` inbox, follows the route, and closes Chromium completely after each account run and before a rejected-login retry. Keep forwarding enabled for the other six active accounts; the inbox account receives its own codes directly. Keep the Mac awake and leave automation browser windows untouched. Stop the scheduler with Control+C. Do not run Docker or a second native scheduler at the same time.
+The launcher reads your local `.env` and runs the full scheduler with native **visible Chromium**, matching the login/MFA test that succeeded on your Mac. It uses recorded login actions and the configured email's original case. It runs one account at a time, obtains each account's MFA from the `rljr.code@gmail.com` inbox, follows the route, and closes Chromium completely after each account run and before a rejected-login retry. Keep forwarding enabled for the other seven accounts; the inbox account receives its own codes directly. Keep the Mac awake and leave automation browser windows untouched. Stop the scheduler with Control+C. Do not run Docker or a second native scheduler at the same time.
 
 `--retry-login-errors` only releases saved step-0 pauses explicitly identified as HTTP 422 `LoginRequestRejected` failures from the old login flow. It retains the reason as history and preserves all cooldown deadlines. Shadow pauses, unknown timeouts, and game-stage failures are not cleared. Omit the flag on later launches if no such retries are needed. Do not delete `data/state.json`.
 
@@ -278,7 +278,7 @@ Failures before the story starts also save `login_diagnostic` in that account's 
 
 ## Apply the latest recorded story path and inspect resumed games
 
-The active seven-account rotation accepts Brave Threshing or Continue your story for both entry controls. The brown-dragon choice is exactly “Lower your eyes and turn to face it”; the red choice is exactly “Lower your eyes in respect”. The old “Lower your eyes and hold still” option is no longer an accepted route choice because the brown page presents it alongside the recorded face-it option. At the tree, it checks every visible option for shadow before selecting the unique “Climb down slowly to pursue…” option. The route then clicks Continue twice and selects the unique “Lower your eyes but keep your…” option. It uses a single click and verifies the radio selection before Next Scene; the recorded double-click is unnecessary.
+The eight-account rotation accepts Brave Threshing or Continue your story for both entry controls. The brown-dragon choice is exactly “Lower your eyes and turn to face it”; the red choice is exactly “Lower your eyes in respect”. The old “Lower your eyes and hold still” option is no longer an accepted route choice because the brown page presents it alongside the recorded face-it option. At the tree, it checks every visible option for shadow before selecting the unique “Climb down slowly to pursue…” option. The route then clicks Continue twice and selects the unique “Lower your eyes but keep your…” option. It uses a single click and verifies the radio selection before Next Scene; the recorded double-click is unnecessary.
 
 A resumed game can begin at a known choice further along this route. The bot identifies the step from the labels actually visible, rather than replaying earlier choices or trusting a saved index. Continue-only pages reveal up to three pages to find a known choice or the result link. The result must lead to Rotunda and show the real cooldown label. Controls must finish appearing before clicks; each browser wait retains its five-minute maximum.
 
@@ -290,7 +290,7 @@ git pull --ff-only
 bash scripts/run-mac.sh --resume-stories
 ```
 
-`--resume-stories` releases only pauses explicitly saved during the story route, story entry/cooldown-panel check, resumed-story inspection, or recorded ending. It keeps their previous reason as history and preserves cooldown deadlines. Shadow pauses, verification-email/login failures, interrupted-run pauses, and inactive account records remain intact. It does not require you to identify a route index. Existing recorded-mode `.env` files work with the new entry controls; preserve your mail credentials. `ralphleggejr@gmail.com` remains excluded.
+`--resume-stories` releases only pauses explicitly saved during the story route, story entry/cooldown-panel check, resumed-story inspection, or recorded ending. It keeps their previous reason as history and preserves cooldown deadlines. Shadow pauses, verification-email/login failures, interrupted-run pauses, and inactive account records remain intact. It does not require you to identify a route index. Existing recorded-mode `.env` files work with the new entry controls; preserve your mail credentials. All eight configured accounts, including `ralphleggejr@gmail.com`, are active again.
 
 Live output confirms that `ralphleggejr.apple@gmail.com` completed the red-dragon route, reached the site cooldown, signed out, and handed off to `leggetechsolutions@gmail.com`. That account resumed at the brown-dragon question, where both “hold still” and “turn to face it” were present. The updated route matches only “turn to face it”. Browser tests cover the simultaneous options in fresh and resumed games; the corrected brown branch, full rotation, and live shadow pause still need validation.
 
@@ -301,3 +301,16 @@ The site's `step-in` animation initially gives later options `visibility: hidden
 If inspection still fails, the console prints `Story page diagnostic` and saves the same `story_diagnostic` under the account in `data/state.json`. It lists the known page path and the page's button/link/choice-label text, with `painted` flags to distinguish transparent controls. It excludes input values, MFA codes, cookies, link targets/query tokens, and general page text. Controlled story-position errors also state whether the position was ambiguous or the allowed Continue-page limit was reached. Share that diagnostic and pause reason to identify the actual unsupported page without another codegen recording.
 
 After applying the brown-choice correction, run `bash scripts/run-mac.sh --resume-stories`. This rechecks the saved story pause for `leggetechsolutions@gmail.com` without resetting the completed account's cooldown. The scheduler skips accounts whose saved cooldown is still active.
+
+## Restart with the restored eighth account
+
+After the site's four-hour cooldown has elapsed, stop the existing bot with Control+C and run:
+
+```bash
+cd "$HOME/Downloads/dragonkind-git"
+git pull --ff-only
+.venv/bin/python -m dragonbot reset --account ralphleggejr@gmail.com --confirm-site-reset
+bash scripts/run-mac.sh --resume-stories --retry-login-errors
+```
+
+The reset command clears only the restored account's old local pause and retains its saved cooldown deadline. It does not reset the website. The launcher also rechecks saved story failures and previous HTTP 422 login rejections for active accounts. Other shadow pauses and cooldown deadlines remain saved. Do not delete `data/state.json`; accounts whose deadlines are already past will run automatically, and a live site cooldown is checked after login.

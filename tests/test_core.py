@@ -224,9 +224,9 @@ class Decisions(unittest.TestCase):
             context.close.assert_called_once()
             browser.close.assert_called_once()
 
-    def test_active_accounts_exclude_temporarily_removed_address(self):
+    def test_all_eight_requested_accounts_are_active_again(self):
         accounts = json.loads(Path('route.json').read_text())['accounts']
-        self.assertEqual(accounts, ['ralphleggejr.apple@gmail.com',
+        self.assertEqual(accounts, ['ralphleggejr@gmail.com', 'ralphleggejr.apple@gmail.com',
             'leggetechsolutions@gmail.com', 'leggefamilyco@gmail.com', 'rljr.code@gmail.com',
             'rlegge.code@gmail.com', 'leggejr.co@gmail.com', '10249southlawncir@gmail.com'])
 
@@ -262,15 +262,18 @@ class Decisions(unittest.TestCase):
         self.assertTrue(state['global_pause'])
 
     def test_desktop_scheduler_resumes_brown_failure_and_retains_cooldown_and_shadow_pause(self):
-        from dragonbot.__main__ import run
+        from dragonbot.__main__ import main, run
         from unittest.mock import MagicMock
         route = json.loads(Path('route.json').read_text())
         accounts = route['accounts']
-        excluded = 'ralphleggejr@gmail.com'
-        state = {'accounts': {accounts[0]: {'status': 'cooldown', 'next_run': 2000},
-                              accounts[1]: {'status': 'paused', 'pause_scope': 'global',
+        restored, cooled, brown, shadow = accounts[:4]
+        excluded = 'inactive@gmail.com'
+        state = {'accounts': {restored: {'status': 'paused', 'step': 0, 'next_run': 0,
+                                        'reason': 'Failure while completing login (TimeoutError)', 'pause_scope': 'global'},
+                              cooled: {'status': 'cooldown', 'next_run': 2000},
+                              brown: {'status': 'paused', 'pause_scope': 'global',
                                             'reason': 'Failure while inspecting the resumed story (StoryPositionError; Multiple options match a recorded story step)'},
-                              accounts[2]: {'status': 'paused', 'pause_scope': 'account',
+                              shadow: {'status': 'paused', 'pause_scope': 'account',
                                             'reason': 'A story option mentions shadow'},
                               excluded: {'status': 'paused', 'step': 0, 'next_run': 0,
                                          'reason': 'Failure while completing login (TimeoutError)',
@@ -288,17 +291,21 @@ class Decisions(unittest.TestCase):
                  patch('dragonbot.__main__.time.time', return_value=1000), \
                  patch('dragonbot.__main__.time.sleep', side_effect=StopIteration), \
                  patch('dragonbot.__main__.run_account', side_effect=attempt):
+                with patch('sys.argv', ['dragonbot', 'reset', '--account', restored, '--confirm-site-reset']):
+                    main()
+                self.assertEqual(state['accounts'][restored], {'next_run': 0})
                 with self.assertRaises(StopIteration):
                     run(headless=False, resume_stories=True)
-        self.assertEqual(played, [accounts[1]] + accounts[3:])
-        self.assertEqual(state['accounts'][accounts[0]]['next_run'], 2000)
-        self.assertEqual(state['accounts'][accounts[2]]['status'], 'paused')
+        self.assertEqual(played, [account for account in accounts if account not in (cooled, shadow)])
+        self.assertEqual(played[0], restored)
+        self.assertEqual(state['accounts'][cooled]['next_run'], 2000)
+        self.assertEqual(state['accounts'][shadow]['status'], 'paused')
         self.assertFalse(state['global_pause'])
         self.assertEqual(state['accounts'][excluded]['status'], 'paused')
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())
-        self.assertEqual(len(set(route['accounts'])), 7)
+        self.assertEqual(len(set(route['accounts'])), 8)
         self.assertEqual(route['cooldown_seconds'], 14400)
         self.assertEqual(route['steps'][route['shadow_checkpoint']],
                          [{'prefix': 'Climb down slowly to pursue'}])
