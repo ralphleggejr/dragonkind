@@ -1,6 +1,6 @@
 # Dragonkind automation
 
-Dockerized Python/Playwright runner for eight configured accounts. **Prototype: the full automated login/game workflow and live death detection have not yet been validated.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+Dockerized Python/Playwright runner for seven active accounts. **Prototype: the full automated login/game workflow and live death detection have not yet been validated.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
 
 ## Behavior
 
@@ -13,7 +13,7 @@ Dockerized Python/Playwright runner for eight configured accounts. **Prototype: 
 
 ## Before you start
 
-This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA retrieval and entry have now succeeded for one account. The full game route, eight-account rotation, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype, not a ready-to-run live bot. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA retrieval and entry have now succeeded for one account. The full game route, the active-account rotation, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
 
 Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. All commands below assume your project folder is named `dragonkind` in Downloads; change the path to match your copy.
 
@@ -63,7 +63,7 @@ SHADOW_PAUSE_SCOPE=account
 
 Replace the example password locally with your Google app password, not your regular Gmail password. Do not paste credentials in chat, commit them, or share `.env`. The project excludes `.env` from Git and the Docker build context. Google two-step verification and account permission to use app passwords are required; this prototype does not implement OAuth. IMAP and authenticated SMTP access must be allowed. Gmail access has not been tested with your account.
 
-Configure forwarding from each of your other seven Gmail inboxes to `rljr.code@gmail.com`, preferably filtered to Dragonkind verification messages. Complete Gmail's forwarding confirmation. The `rljr.code@gmail.com` account already receives its own login messages directly. Preserve the original sender and recipient when forwarding; stripped-down code-only messages are not supported.
+Configure forwarding from each of your other six active Gmail inboxes to `rljr.code@gmail.com`, preferably filtered to Dragonkind verification messages. Complete Gmail's forwarding confirmation. The `rljr.code@gmail.com` account already receives its own login messages directly. Preserve the original sender and recipient when forwarding; stripped-down code-only messages are not supported.
 
 Required live-site configuration:
 
@@ -123,7 +123,7 @@ For the first live trial, temporarily keep just one account in `route.json`. Run
 docker compose up
 ```
 
-Forward the newly requested email if it is not forwarded automatically. Confirm one full login, expected story choices, death detection, logout, and email notification before restoring all eight accounts. A mismatch pauses the app for review rather than guessing another action.
+Forward the newly requested email if it is not forwarded automatically. Confirm one full login, expected story choices, death detection, logout, and email notification before enabling all configured accounts. A mismatch pauses the app for review rather than guessing another action.
 
 Press **Control+C** to stop foreground operation on either system. After live validation, background operation uses:
 
@@ -226,7 +226,7 @@ To reproduce the visible Chromium login from codegen, stop Docker and run:
 cd "$HOME/Downloads/dragonkind-git"
 docker compose down
 git pull --ff-only
-bash scripts/replay-login-mac.sh ralphleggejr@gmail.com
+bash scripts/replay-login-mac.sh ralphleggejr.apple@gmail.com
 ```
 
 This installs/uses native Playwright in `.venv`, opens a new visible browser, performs the recorded welcome → click email field → fill email → click arrow sequence, and waits for the code field. Enter the verification code directly in that browser. The replay waits for the code field to disappear, visits the recorded `/rotunda` URL when needed, and confirms authenticated UI (Brave Threshing, Profile, a cooldown, or an already-started game) before closing the entire browser. It stops before clicking any story choices. It does not load `.env`, read Gmail, record the code, save browser storage, reset the site's state, or change `data/state.json`. Supply another authorized account as the script's argument if needed. The normal Docker runner keeps automatic forwarded-email MFA and the full game route.
@@ -241,18 +241,20 @@ After a successful code request/forwarding test, test inbox matching and automat
 cd "$HOME/Downloads/dragonkind-git"
 docker compose down
 git pull --ff-only
-bash scripts/test-login-mac.sh ralphleggejr@gmail.com
+bash scripts/test-login-mac.sh ralphleggejr.apple@gmail.com
 ```
 
 This launcher installs native Playwright and python-dotenv in `.venv`, opens visible Chromium, and reads mail settings from the local `.env` without overriding existing exported values. It establishes a fresh inbox UID boundary, requests one login code, waits for the matching forwarded email, and fills MFA automatically. Leave the browser untouched during this test; do not enter the code or click Brave Threshing yourself. The browser closes after authenticated UI is confirmed. A cooldown label or an already-started game can also confirm authentication, without starting/restarting the story. It does not modify pause/cooldown state, persist browser storage, record codes, or make game choices. Native Mac success does not establish Docker readiness.
 
 The manual replay now reports user-closed windows as a cancelled test instead of a TargetClosedError traceback. Navigation to the recorded Rotunda URL happens only when the code field has disappeared and the browser has not already reached Rotunda, Archway, or Play; authenticated UI markers are still required. If you manually click through while replay is waiting, it can recognize authenticated game UI, but it never clicks those story controls itself.
 
-## Run all eight accounts in the verified Mac browser mode
+## Run the seven active accounts in the verified Mac browser mode
 
-`route.json` lists these eight addresses in rotation order: `ralphleggejr@gmail.com`, `ralphleggejr.apple@gmail.com`, `leggetechsolutions@gmail.com`, `leggefamilyco@gmail.com`, `rljr.code@gmail.com`, `rlegge.code@gmail.com`, `leggejr.co@gmail.com`, and `10249southlawncir@gmail.com`.
+`route.json` lists these seven active addresses in rotation order: `ralphleggejr.apple@gmail.com`, `leggetechsolutions@gmail.com`, `leggefamilyco@gmail.com`, `rljr.code@gmail.com`, `rlegge.code@gmail.com`, `leggejr.co@gmail.com`, and `10249southlawncir@gmail.com`.
 
-If your local `route.json` still has the single-account test configuration, preserve that edit in a Git stash before pulling the new eight-account file. Keep the stash; do not pop it over the new configuration:
+`ralphleggejr@gmail.com` is temporarily excluded. Its saved state and cooldown remain in `data/state.json`, but its pause does not block the active rotation. The first active account is now `ralphleggejr.apple@gmail.com`. Re-adding the excluded account also restores the effect of any unresolved pause it still has.
+
+If your local `route.json` still has the single-account test configuration, preserve that edit in a Git stash before pulling the current account file. Keep the stash; do not pop it over the new configuration:
 
 ```bash
 cd "$HOME/Downloads/dragonkind-git"
@@ -262,14 +264,14 @@ git pull --ff-only
 bash scripts/run-mac.sh --retry-login-errors
 ```
 
-The launcher reads your local `.env` and runs the full scheduler with native **visible Chromium**, matching the login/MFA test that succeeded on your Mac. It uses recorded login actions and the configured email's original case. It runs one account at a time, obtains each account's MFA from the `rljr.code@gmail.com` inbox, follows the route, and closes Chromium completely after each account run and before a rejected-login retry. Keep forwarding enabled for the other seven accounts; the inbox account receives its own codes directly. Keep the Mac awake and leave automation browser windows untouched. Stop the scheduler with Control+C. Do not run Docker or a second native scheduler at the same time.
+The launcher reads your local `.env` and runs the full scheduler with native **visible Chromium**, matching the login/MFA test that succeeded on your Mac. It uses recorded login actions and the configured email's original case. It runs one account at a time, obtains each account's MFA from the `rljr.code@gmail.com` inbox, follows the route, and closes Chromium completely after each account run and before a rejected-login retry. Keep forwarding enabled for the other six active accounts; the inbox account receives its own codes directly. Keep the Mac awake and leave automation browser windows untouched. Stop the scheduler with Control+C. Do not run Docker or a second native scheduler at the same time.
 
 `--retry-login-errors` only releases saved step-0 pauses explicitly identified as HTTP 422 `LoginRequestRejected` failures from the old login flow. It retains the reason as history and preserves all cooldown deadlines. Shadow pauses, unknown timeouts, and game-stage failures are not cleared. Omit the flag on later launches if no such retries are needed. Do not delete `data/state.json`.
 
 If a logged-in account already shows a site cooldown, the runner signs out, saves that account's advertised `data-countdown`/`datetime` deadline when available (otherwise a conservative four-hour delay), and moves on. An already-started game is paused for that account's review rather than guessing a route position. Confirmed bot deaths retain their separate four-hour cooldowns. The shadow checkpoint pauses only that account by default; other unexpected failures still pause the scheduler for review.
 
-Native automatic login is verified for one account. The full story route, all eight accounts, and unattended operation still need live validation; watch the first rotation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.
+Native automatic login is verified for one account. The full story route, the active-account rotation, and unattended operation still need live validation; watch the first rotation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.
 
-If the browser closes and the Terminal prompt returns after the first account, inspect `data/state.json`. A global pause stops the remaining accounts even when all eight addresses are configured. The console now prints the pause reason and distinguishes entering MFA, waiting for the verification form to close, waiting for authenticated controls, and waiting for the story start/cooldown panel. `Login confirmed (authenticated)` means that a logged-in control such as Profile was found; the scheduler still needs Brave Threshing or the site's cooldown panel before proceeding.
+If the browser closes and the Terminal prompt returns after the first account, inspect `data/state.json`. A global pause stops the remaining accounts even when all addresses are configured. The console now prints the pause reason and distinguishes entering MFA, waiting for the verification form to close, waiting for authenticated controls, and waiting for the story start/cooldown panel. `Login confirmed (authenticated)` means that a logged-in control such as Profile was found; the scheduler still needs Brave Threshing or the site's cooldown panel before proceeding.
 
 Failures before the story starts also save `login_diagnostic` in that account's state and print it to the console. This contains only the known page path, document readiness, and counts/visibility of known controls. It excludes query strings, input values, verification codes, cookies, tokens, and page text. Share this diagnostic and the reported stage when troubleshooting. Do not delete the state or automatically clear unknown timeouts; retain cooldowns and review the cause before resetting the affected account. A successful login-only test does not clear an existing scheduler pause.

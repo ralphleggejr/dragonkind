@@ -198,9 +198,9 @@ class Decisions(unittest.TestCase):
             context.close.assert_called_once()
             browser.close.assert_called_once()
 
-    def test_eight_accounts_are_exactly_the_requested_addresses(self):
+    def test_active_accounts_exclude_temporarily_removed_address(self):
         accounts = json.loads(Path('route.json').read_text())['accounts']
-        self.assertEqual(accounts, ['ralphleggejr@gmail.com', 'ralphleggejr.apple@gmail.com',
+        self.assertEqual(accounts, ['ralphleggejr.apple@gmail.com',
             'leggetechsolutions@gmail.com', 'leggefamilyco@gmail.com', 'rljr.code@gmail.com',
             'rlegge.code@gmail.com', 'leggejr.co@gmail.com', '10249southlawncir@gmail.com'])
 
@@ -218,13 +218,17 @@ class Decisions(unittest.TestCase):
         self.assertEqual(state['accounts']['shadow@gmail.com']['status'], 'paused')
         self.assertTrue(state['global_pause'])
 
-    def test_desktop_scheduler_visits_all_eight_and_skips_individual_cooldowns(self):
+    def test_desktop_scheduler_ignores_removed_account_pause_and_skips_individual_cooldowns(self):
         from dragonbot.__main__ import run
         from unittest.mock import MagicMock
         route = json.loads(Path('route.json').read_text())
         accounts = route['accounts']
+        excluded = 'ralphleggejr@gmail.com'
         state = {'accounts': {accounts[0]: {'status': 'cooldown', 'next_run': 2000},
-                              accounts[1]: {'status': 'paused', 'pause_scope': 'account'}}, 'global_pause': False}
+                              accounts[1]: {'status': 'paused', 'pause_scope': 'account'},
+                              excluded: {'status': 'paused', 'step': 0, 'next_run': 0,
+                                         'reason': 'Failure while completing login (TimeoutError)',
+                                         'pause_scope': 'global'}}, 'global_pause': True}
         played = []
         def attempt(engine, plan, saved, account, headless):
             self.assertFalse(headless)
@@ -242,10 +246,12 @@ class Decisions(unittest.TestCase):
                     run(headless=False)
         self.assertEqual(played, accounts[2:])
         self.assertEqual(state['accounts'][accounts[0]]['next_run'], 2000)
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(state['accounts'][excluded]['status'], 'paused')
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())
-        self.assertEqual(len(set(route['accounts'])), 8)
+        self.assertEqual(len(set(route['accounts'])), 7)
         self.assertEqual(route['cooldown_seconds'], 14400)
         self.assertEqual(route['steps'][route['shadow_checkpoint']],
                          ["Descend quickly in preparation for whatever's coming your way"])
