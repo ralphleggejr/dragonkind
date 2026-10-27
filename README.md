@@ -1,6 +1,64 @@
 # Dragonkind automation
 
-Dockerized Python/Playwright runner for eight active accounts. **Native Mac automation has completed one account in live testing; the full rotation and Docker login still need validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+Dockerized Python/Playwright runner for eight active accounts. **All eight accounts completed one native Mac rotation in live testing. Native headless mode, background service operation, and Docker login still require live validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+
+## Run every four hours without keeping Terminal open
+
+The scheduler repeats each account **four hours after that account finishes**, using the saved `next_run` deadline. It keeps no browser or Playwright driver open during cooldowns and prints the next account/time. Leave the scheduler running: Control+C stops scheduling. A screen saver, screen lock, or sleeping display does not stop a headless browser. Full system sleep, closing a MacBook lid, shutdown, and lost network access can stop progress.
+
+The native Mac LaunchAgent below runs independently of Terminal, starts when you log in, and uses `caffeinate -i` to prevent **idle system sleep**. It still allows the screen saver, display sleep, and screen locking. Keep the MacBook plugged in with its lid open. The job stops after an intentional global/all-account pause and retries process crashes; saved cooldowns and shadow pauses survive restarts. Stopping mid-story still requires reviewing the saved interrupted-run pause.
+
+### Native Mac background service
+
+Stop the current native bot with Control+C. Stop any Docker bot before switching to the native service. Move the complete checkout out of Downloads/Desktop/Documents so a LaunchAgent can access it without depending on Terminal's macOS folder permissions. The following one-time move preserves `.env`, `data/`, Git history, and the virtual environment. It stops if the destination already exists; do not overwrite another checkout:
+
+```bash
+cd "$HOME/Downloads/dragonkind-git" &&
+git pull --ff-only &&
+mkdir -p "$HOME/Projects" &&
+test ! -e "$HOME/Projects/dragonkind-git" &&
+mv "$HOME/Downloads/dragonkind-git" "$HOME/Projects/dragonkind-git" &&
+cd "$HOME/Projects/dragonkind-git" &&
+bash scripts/test-login-mac.sh ralphleggejr@gmail.com --headless &&
+bash scripts/service-mac.sh install --headless
+```
+
+The login-only test requests a real fresh verification email and enters the forwarded MFA code, but makes no story choices and leaves `data/state.json` unchanged. The background installation runs only if the test succeeds. A successful visible-browser run does not establish headless readiness: older Docker login attempts received HTTP 422, so this native headless preflight matters. If headless login fails, keep the same saved state and install the service **without** `--headless` to use the verified visible browser mode. That mode can display a browser window during an attempt; browser behavior under screen locking still needs testing on the Mac.
+
+The launcher recreates/updates `.venv` at its new location. The LaunchAgent runs Python directly; it does not reinstall packages every four hours. Mail credentials stay in your local `.env`, outside Git and the LaunchAgent plist. A data-directory lock prevents a second scheduler, login test, or reset from running alongside the service. Do not run a Docker or foreground copy with the same accounts elsewhere.
+
+After the one-time move, use `~/Projects/dragonkind-git` for future commands:
+
+```bash
+cd "$HOME/Projects/dragonkind-git"
+bash scripts/service-mac.sh status
+tail -f data/dragonbot.log
+```
+
+Control+C in `tail` closes only the log viewer. Stop the actual background job with:
+
+```bash
+cd "$HOME/Projects/dragonkind-git"
+bash scripts/service-mac.sh stop
+```
+
+This also disables automatic starts at login. Start it again with `bash scripts/service-mac.sh start`. To change browser mode or update dependencies, stop it, pull updates, then rerun `bash scripts/service-mac.sh install --headless` (or omit `--headless` for visible mode). The job is `com.dragonkind.dragonbot`, with its plist in `~/Library/LaunchAgents/`. A paused job does not silently clear pauses or start a new game.
+
+For a foreground windowless run instead, use `bash scripts/run-mac.sh --headless`. It still stops when that Terminal process exits; use the service for unattended scheduling.
+
+### Docker background mode on Mac or Windows
+
+Docker already runs Chromium headlessly. Compose now forces the recorded login flow/casing used by the successful native runner, retains account state in `./data`, and retries a crashed process up to three times. Verify the current Docker runtime separately before leaving it unattended:
+
+```sh
+docker compose build &&
+docker compose run --rm dragonbot python -m dragonbot desktop-login --account ralphleggejr@gmail.com --headless &&
+docker compose up -d
+```
+
+The preflight performs automatic MFA but no story choices. The service then keeps its lightweight scheduler alive and opens a browser only for due accounts. View output with `docker compose logs -f dragonbot`; stop it with `docker compose down`. A successful native headless test does not verify Docker login.
+
+Docker cannot prevent its host from sleeping. On Windows, keep Docker Desktop running with Linux containers and configure plugged-in system sleep to Never while allowing the screen/display to turn off. On macOS, keep the host awake separately, or use the native LaunchAgent above. A screen saver or lock screen is fine for a headless container while the host remains awake. No container can keep working through a powered-off or sleeping host.
 
 ## Behavior
 
@@ -13,9 +71,9 @@ Dockerized Python/Playwright runner for eight active accounts. **Native Mac auto
 
 ## Before you start
 
-This is a prototype with one completed native Mac story run. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA, the red-dragon story route, site cooldown confirmation, logout, and handoff to the next account have succeeded on the Mac. The brown branch, full rotation, shadow handling, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype with one completed eight-account native Mac rotation. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA, both recorded dragon branches, site cooldown confirmation, logout, and handoff through all eight accounts have succeeded on the Mac. Headless/background operation, repeating after four hours, live shadow handling, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
 
-Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. All commands below assume your project folder is named `dragonkind` in Downloads; change the path to match your copy.
+Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. The initial Docker examples use `~/Downloads/dragonkind`; the working Git checkout uses `~/Downloads/dragonkind-git`. The native background setup above moves the whole checkout to `~/Projects/dragonkind-git`; use that location afterward.
 
 Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) for your computer and open it. Wait for its engine to finish starting. You do not need to install Python separately to run the Docker app.
 
@@ -138,7 +196,7 @@ When following background logs, Control+C exits the log viewer and leaves the se
 docker compose down
 ```
 
-Keep Docker Desktop running and the computer awake for scheduling to continue. The service does not automatically restart after a crash or reboot; restart it explicitly and review any interrupted-run pause. After code or dependency changes, rebuild with `docker compose build` before starting again.
+Keep Docker Desktop running and the computer awake for scheduling to continue. Compose retries a failed process up to three times and leaves intentional pauses stopped. Start the service explicitly after restarting Docker Desktop or the computer, and review any interrupted-run pause. After code or dependency changes, rebuild with `docker compose build` before starting again.
 
 ### Move from Mac to Windows (or back)
 
@@ -158,7 +216,7 @@ Stop the service on the old computer with `docker compose down`. Copy the projec
 
 Read `data/state.json`, the notification, and the account's `data/*-paused.png`. Paused screenshots finish CSS animations so a rejection message is not captured as an empty frame. Screenshots can contain account or story details; keep this folder private. Email updates contain the account, reason, and route step, but no screenshot or login code.
 
-No automatic resume from the middle of a story is implemented. Resolve the event manually and reset the site's run to the initial route state first. Stop the service with `docker compose down`, then explicitly clear the selected account's pause:
+Known resumed story choices are identified from the visible page with `--resume-stories`. Shadow pauses still require your review; clear a selected account's pause only after handling the event and confirming that the site can re-enter its recorded route. Stop the service with `docker compose down`, then explicitly clear the selected account's pause:
 
 ```sh
 docker compose run --rm dragonbot python -m dragonbot reset --account rljr.code@gmail.com --confirm-site-reset
@@ -270,7 +328,7 @@ The launcher reads your local `.env` and runs the full scheduler with native **v
 
 If a logged-in account already shows a site cooldown, the runner signs out, saves that account's advertised `data-countdown`/`datetime` deadline when available (otherwise a conservative four-hour delay), and moves on. An already-started game uses the recorded Continue your story entry and identifies its current position from visible choice labels. It can reveal up to three Continue-only pages to find a known choice or a result link. Unknown or ambiguous choices still pause; it never infers story position from `/play` alone. Confirmed bot deaths retain their separate four-hour cooldowns. The shadow checkpoint pauses only that account by default; other unexpected failures still pause the scheduler for review.
 
-Native automatic login and one complete red-dragon story run have succeeded, including cooldown, logout, and handoff to the next account. The brown branch, full rotation, shadow handling, and unattended operation still need live validation; watch the first rotation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.
+One full visible-browser Mac rotation has completed for all eight accounts, including both recorded dragon branches, cooldown confirmation, logout, and account handoff. Headless/background operation, repeated four-hour cycles, live shadow handling, and unattended operation still need validation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.
 
 If the browser closes and the Terminal prompt returns after the first account, inspect `data/state.json`. A global pause stops the remaining accounts even when all addresses are configured. The console now prints the pause reason and distinguishes entering MFA, waiting for the verification form to close, waiting for authenticated controls, and waiting for the story start/cooldown panel. `Login confirmed (authenticated)` means that a logged-in control such as Profile was found; the scheduler still needs a recognized Brave Threshing/Continue your story entry or the site's cooldown panel before proceeding.
 
@@ -316,3 +374,5 @@ bash scripts/run-mac.sh --resume-stories --retry-login-errors
 ```
 
 The reset command clears only the restored account's old local pause and retains its saved cooldown deadline. It does not reset the website. The launcher also rechecks saved story failures and previous HTTP 422 login rejections for active accounts. Other shadow pauses and cooldown deadlines remain saved. Do not delete `data/state.json`; accounts whose deadlines are already past will run automatically, and a live site cooldown is checked after login.
+
+Live output now confirms one complete visible-browser rotation for all eight accounts. The original runner was waiting for the next four-hour deadline when Control+C stopped it. Scheduling, resource cleanup between attempts, file locking, headless flag propagation, clean stopping, and LaunchAgent configuration are tested locally. The native service still needs installation on the Mac, and headless login must pass the provided live preflight.

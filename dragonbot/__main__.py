@@ -1,12 +1,15 @@
 import argparse
 import json
 import os
+import signal
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError
 from .mail import highwater, inbox, notify, wait_code
+from .runtime import AlreadyRunningError, next_attempt, state_lock
 
 STATE = Path('data/state.json')
 REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECTOR',
@@ -693,6 +696,11 @@ def run_account(playwright, route, state, account, headless=True):
 
 
 def run(headless=True, retry_rejected=False, resume_stories=False):
+    with state_lock(STATE):
+        return run_scheduler(headless, retry_rejected, resume_stories)
+
+
+def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
     from playwright.sync_api import sync_playwright
     route = configuration()
     state = load_state(STATE)
@@ -706,6 +714,7 @@ def run(headless=True, retry_rejected=False, resume_stories=False):
         print('Rechecking saved story failures against the visible site: ' + (', '.join(resumed) or 'none'), flush=True)
     save_state(STATE, state)
     print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
+    print('Browser mode: ' + ('headless (no visible windows).' if headless else 'visible Chromium.'), flush=True)
     for account, record in state['accounts'].items():
         if account not in active_accounts:
             continue
@@ -719,21 +728,34 @@ def run(headless=True, retry_rejected=False, resume_stories=False):
     if state['global_pause']:
         print('Global pause is active. Review data/state.json and the saved screenshot.')
         return
-    with sync_playwright() as playwright:
-        while not state['global_pause']:
-            for account in route['accounts']:
-                record = state['accounts'].get(account, {})
-                if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
-                    continue
-                run_account(playwright, route, state, account, headless=headless)
-                if state['global_pause']:
-                    print('Global pause is active; the remaining accounts have not been started. Review data/state.json.', flush=True)
-                    break
-            if all(state['accounts'].get(a, {}).get('status') == 'paused' for a in route['accounts']):
-                print('All configured accounts are paused; review saved state.', flush=True)
-                break
-            if not state['global_pause']:
-                time.sleep(15)
+    last_schedule = None
+    while not state['global_pause']:
+        runnable = any(state['accounts'].get(account, {}).get('status') != 'paused'
+                       and state['accounts'].get(account, {}).get('next_run', 0) <= time.time()
+                       for account in active_accounts)
+        if runnable:
+            # No browser or Playwright driver is kept alive during the cooldown wait.
+            with sync_playwright() as playwright:
+                for account in active_accounts:
+                    record = state['accounts'].get(account, {})
+                    if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
+                        continue
+                    run_account(playwright, route, state, account, headless=headless)
+                    if state['global_pause']:
+                        print('Global pause is active; the remaining accounts have not been started. Review data/state.json.', flush=True)
+                        break
+        if state['global_pause']:
+            return
+        scheduled = next_attempt(state, active_accounts, time.time())
+        if scheduled is None:
+            print('All configured accounts are paused; review saved state.', flush=True)
+            return
+        account, deadline = scheduled
+        if scheduled != last_schedule:
+            local_time = datetime.fromtimestamp(deadline).astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')
+            print(f'Next attempt: {account} at {local_time}. Waiting with browsers closed.', flush=True)
+            last_schedule = scheduled
+        time.sleep(min(60, max(1, deadline - time.time())))
 
 
 def inspect_login_submission(page, account):
@@ -800,7 +822,12 @@ def mail_login_page(page, account):
     return complete_mfa(page, code, allow_existing_session=True)
 
 
-def replay_login(account, automatic=False):
+def replay_login(account, automatic=False, headless=False):
+    with state_lock(STATE):
+        return replay_login_locked(account, automatic, headless)
+
+
+def replay_login_locked(account, automatic=False, headless=False):
     from playwright.sync_api import sync_playwright, Error as BrowserError
     if automatic:
         from dotenv import load_dotenv
@@ -808,11 +835,11 @@ def replay_login(account, automatic=False):
         missing = [name for name in ("MAIL_USER", "MAIL_PASSWORD", "MFA_ORIGINAL_SENDER") if not os.environ.get(name)]
         if missing:
             raise RuntimeError("Missing mail settings: " + ", ".join(missing))
-    # Use native headed Chromium; automatic mode reads only local mail bindings.
+    # Automatic mode can verify native headless login without making story choices.
     os.environ['LOGIN_FLOW'] = 'recorded'
     os.environ['LOGIN_EMAIL_CASE'] = 'original'
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
+        browser = playwright.chromium.launch(headless=headless)
         context = None
         page = None
         try:
@@ -854,6 +881,7 @@ def main():
     parser.add_argument('--confirm-site-reset', action='store_true')
     parser.add_argument('--retry-login-errors', action='store_true', help='Retry only saved pre-MFA HTTP 422 rejections; retain cooldowns and other pauses.')
     parser.add_argument('--resume-stories', action='store_true', help='Recheck saved story-stage failures using the recorded entry and visible choices; retain shadow pauses and cooldowns.')
+    parser.add_argument('--headless', action='store_true', help='Use Chromium without visible windows for run-desktop or desktop-login.')
     args = parser.parse_args()
     if args.command == 'check':
         configuration()
@@ -863,11 +891,13 @@ def main():
         load_dotenv(dotenv_path=Path('.env'), override=False)
         os.environ['LOGIN_FLOW'] = 'recorded'
         os.environ['LOGIN_EMAIL_CASE'] = 'original'
-        run(headless=False, retry_rejected=args.retry_login_errors, resume_stories=args.resume_stories)
+        run(headless=args.headless, retry_rejected=args.retry_login_errors, resume_stories=args.resume_stories)
     elif args.command in ('replay-login', 'desktop-login'):
         if not args.account:
             parser.error(f'{args.command} requires --account')
-        if replay_login(args.account, automatic=args.command == 'desktop-login') is False:
+        if args.headless and args.command == 'replay-login':
+            parser.error('Use desktop-login for automatic MFA in headless mode')
+        if replay_login(args.account, automatic=args.command == 'desktop-login', headless=args.headless) is False:
             raise SystemExit(2)
     elif args.command == 'diagnose-login':
         if not args.account:
@@ -877,15 +907,29 @@ def main():
         route = json.loads(Path('route.json').read_text())
         if args.account not in route['accounts'] or not args.confirm_site_reset:
             parser.error('reset requires a configured --account and --confirm-site-reset')
-        state = load_state(STATE)
-        refresh_global_pause(state, route['accounts'])
-        old = state['accounts'].get(args.account, {})
-        state['accounts'][args.account] = {'next_run': old.get('next_run', 0)}
-        refresh_global_pause(state, route['accounts'])
-        save_state(STATE, state)
+        with state_lock(STATE):
+            state = load_state(STATE)
+            refresh_global_pause(state, route['accounts'])
+            old = state['accounts'].get(args.account, {})
+            state['accounts'][args.account] = {'next_run': old.get('next_run', 0)}
+            refresh_global_pause(state, route['accounts'])
+            save_state(STATE, state)
     else:
         run(retry_rejected=args.retry_login_errors, resume_stories=args.resume_stories)
 
 
+def entrypoint():
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('Stopped. Saved cooldowns and pauses are retained.', flush=True)
+    except AlreadyRunningError as error:
+        print(str(error), file=sys.stderr, flush=True)
+        raise SystemExit(2)
+
+
 if __name__ == '__main__':
-    main()
+    entrypoint()

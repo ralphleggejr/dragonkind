@@ -2,8 +2,11 @@ services:
   dragonbot:
     build: .
     env_file: .env
+    environment:
+      LOGIN_FLOW: recorded
+      LOGIN_EMAIL_CASE: original
     volumes:
       - ./data:/app/data
       - ./route.json:/app/route.json:ro
-    restart: "no"
+    restart: "on-failure:3"
     init: true

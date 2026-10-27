@@ -2,8 +2,8 @@
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$SCRIPT_DIR/.."
-if [ "$#" -ne 1 ]; then
-    echo 'Usage: bash scripts/test-login-mac.sh your-email@gmail.com' >&2
+if [ "$#" -lt 1 ]; then
+    echo 'Usage: bash scripts/test-login-mac.sh your-email@gmail.com [--headless]' >&2
     exit 1
 fi
 if ! command -v python3 >/dev/null 2>&1; then
@@ -13,4 +13,6 @@ fi
 python3 -m venv .venv
 .venv/bin/python -m pip install 'playwright==1.58.0' 'python-dotenv==1.2.1'
 .venv/bin/python -m playwright install chromium
-exec .venv/bin/python -m dragonbot desktop-login --account "$1"
+DRAGONKIND_TEST_ACCOUNT=$1
+shift
+exec .venv/bin/python -m dragonbot desktop-login --account "$DRAGONKIND_TEST_ACCOUNT" "$@"
