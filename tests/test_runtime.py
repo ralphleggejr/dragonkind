@@ -72,6 +72,7 @@ class Scheduling(unittest.TestCase):
                  patch('dragonbot.__main__.time.time', side_effect=lambda: now[0]), \
                  patch('dragonbot.__main__.time.sleep', side_effect=wait), \
                  patch('playwright.sync_api.sync_playwright', return_value=driver), \
+                 patch('dragonbot.__main__.notify'), \
                  patch('dragonbot.__main__.run_account', side_effect=play):
                 with self.assertRaises(StopIteration):
                     run()

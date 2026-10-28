@@ -73,9 +73,9 @@ class Decisions(unittest.TestCase):
             path = Path(directory) / 'state.json'
             with patch('dragonbot.__main__.STATE', path), \
                  patch('dragonbot.__main__.notify', side_effect=[RuntimeError(), None]) as mail:
-                alert(state, 'one@gmail.com', 'Tree checkpoint needs review', global_pause=False, details=details)
+                alert(state, 'one@gmail.com', 'A story option mentions shadow', global_pause=False, details=details)
                 self.assertTrue(load_state(path)['accounts']['one@gmail.com']['notification_pending'])
-                alert(state, 'one@gmail.com', 'Tree checkpoint needs review', global_pause=False)
+                alert(state, 'one@gmail.com', 'A story option mentions shadow', global_pause=False)
                 self.assertIn(details, mail.call_args.args[1])
                 saved = load_state(path)
                 self.assertFalse(saved['accounts']['one@gmail.com']['notification_pending'])
@@ -307,6 +307,7 @@ class Decisions(unittest.TestCase):
                  patch('playwright.sync_api.sync_playwright', return_value=MagicMock()), \
                  patch('dragonbot.__main__.time.time', return_value=1000), \
                  patch('dragonbot.__main__.time.sleep', side_effect=StopIteration), \
+                 patch('dragonbot.__main__.notify'), \
                  patch('dragonbot.__main__.run_account', side_effect=attempt):
                 with patch('sys.argv', ['dragonbot', 'reset', '--account', restored, '--confirm-site-reset']):
                     main()

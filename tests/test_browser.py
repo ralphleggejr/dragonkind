@@ -123,7 +123,7 @@ class BrowserFlow(unittest.TestCase):
         import time
         self.assertGreater(record['next_run'], time.time() + 14300)
         self.assertFalse(state['global_pause'])
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def test_shadow_pauses_only_one_account_and_notifies(self):
         state, emails = self.exercise(shadow=True)
@@ -140,7 +140,7 @@ class BrowserFlow(unittest.TestCase):
         state, emails = self.exercise(mismatch=True)
         self.assertTrue(state['global_pause'])
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def test_welcome_reveals_real_text_email_field(self):
         context = self.browser.new_context()
@@ -243,7 +243,7 @@ class BrowserFlow(unittest.TestCase):
     def test_full_route_selects_radios_and_submits_each_choice(self):
         state, emails = self.exercise(auto_submit=True, forms=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def test_shadow_on_radio_page_does_not_submit(self):
         state, emails = self.exercise(auto_submit=True, forms=True, shadow=True)
@@ -283,7 +283,7 @@ class BrowserFlow(unittest.TestCase):
     def test_death_continue_rotunda_profile_and_signout(self):
         state, emails = self.exercise(auto_submit=True, forms=True, logout_flow=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def test_shadow_in_first_label_also_pauses(self):
         state, _ = self.exercise(auto_submit=True, forms=True, shadow=True, shadow_position=0)
@@ -304,14 +304,14 @@ class BrowserFlow(unittest.TestCase):
     def test_red_dragon_branch_rejoins_forest_route(self):
         state, emails = self.exercise(auto_submit=True, forms=True, logout_flow=True, red_dragon=True)
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'cooldown')
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def test_supplied_death_pages_confirm_result_then_site_cooldown_and_logout(self):
         state, emails = self.exercise(auto_submit=True, forms=True, result_flow=True)
         record = state['accounts'][ROUTE['accounts'][0]]
         self.assertEqual(record['status'], 'cooldown')
         self.assertGreater(record['next_run'], __import__('time').time() + 14300)
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
 
     def exercise_latest_recording(self, resumed=False, red=False, ending_pages=2,
                                   shadow_option=False, cooldown=True, direct_play=False, known_narrative=False,
@@ -433,18 +433,12 @@ class BrowserFlow(unittest.TestCase):
         self.assertIn('Lower your eyes but keep your head high', selected)
         self.assertEqual(requests.count('/rotunda'), 2)
         self.assertEqual(requests[-1], '/')
-        self.assertEqual(emails, 1)
-        self.assertIn('Outcome: CONTINUED', notifications[0])
-        self.assertIn('Safety checks recorded: 3', notifications[0])
-        for stage in ('initial', 'before selection', 'before submission'):
-            self.assertIn(stage, notifications[0])
-        self.assertIn('Options found: 2', notifications[0])
-        self.assertEqual(notifications[0].count('Visible options: 2 of 2'), 3)
-        self.assertEqual(notifications[0].count('All options visible: YES'), 3)
-        self.assertEqual(notifications[0].count('Animations complete: YES'), 3)
-        self.assertIn('Shadow found: NO', notifications[0])
-        self.assertIn('Climb down slowly to pursue the sound', notifications[0])
-        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['last_tree_report']['status'], 'sent')
+        self.assertEqual(emails, 0)
+        self.assertEqual(notifications, [])
+        checks = state['accounts'][ROUTE['accounts'][0]]['tree_checkpoint_checks']
+        self.assertEqual([check['stage'] for check in checks],
+                         ['initial', 'before selection', 'before submission'])
+        self.assertTrue(all(check['all_visible'] and check['animations_complete'] for check in checks))
 
     def test_continue_your_story_recording_accepts_three_ending_pages(self):
         state, requests, selected, _ = self.exercise_latest_recording(resumed=True, ending_pages=3)
@@ -474,7 +468,7 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(requests.count('/rotunda'), 1)
         self.assertEqual(emails, 1)
 
-    def test_tree_third_option_without_shadow_pauses_and_emails_all_labels(self):
+    def test_tree_third_option_without_shadow_pauses_and_defers_email(self):
         notifications = []
         state, requests, selected, emails = self.exercise_latest_recording(
             extra_option='Follow an unfamiliar movement', notification_bodies=notifications)
@@ -485,13 +479,15 @@ class BrowserFlow(unittest.TestCase):
         self.assertFalse(state['global_pause'])
         self.assertNotIn('Climb down slowly to pursue the sound', selected)
         self.assertEqual(requests.count('/rotunda'), 1)
-        self.assertEqual(emails, 1)
+        self.assertEqual(emails, 0)
         check = record['tree_checkpoint_checks'][-1]
         self.assertEqual(check['option_count'], 3)
         self.assertFalse(check['shadow_found'])
-        self.assertIn('Options found: 3', notifications[0])
+        self.assertEqual(notifications, [])
+        self.assertTrue(record['notification_deferred'])
+        self.assertIn('Options found: 3', record['notification_details'])
         for option in check['options']:
-            self.assertIn(option['text'], notifications[0])
+            self.assertIn(option['text'], record['notification_details'])
 
     def test_resumed_tree_counts_a_never_visible_third_option(self):
         notifications = []
@@ -504,9 +500,10 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(record['tree_checkpoint_checks'][-1]['option_count'], 3)
         self.assertFalse(record['tree_checkpoint_checks'][-1]['options'][-1]['painted'])
         self.assertEqual(selected, [])
-        self.assertEqual(emails, 1)
-        self.assertIn('Visible options: 2 of 3', notifications[0])
-        self.assertIn('All options visible: NO', notifications[0])
+        self.assertEqual(emails, 0)
+        self.assertEqual(notifications, [])
+        self.assertIn('Visible options: 2 of 3', record['notification_details'])
+        self.assertIn('All options visible: NO', record['notification_details'])
 
     def exercise_tree_safety_checks(self, extra_html='', after_initial='', on_select='', animated=False,
                                     selector='label[for^="choice-"]', other_text='Another choice', setup_script='',

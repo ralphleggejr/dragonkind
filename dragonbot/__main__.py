@@ -7,10 +7,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
-from uuid import uuid4
 from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError, matching_choices
 from .mail import highwater, inbox, notify, wait_code
 from .runtime import AlreadyRunningError, next_attempt, state_lock
+from .rotation import begin_rotation, record_result, recover_finished_result, rotation_ready, rotation_summary
 
 STATE = Path('data/state.json')
 TREE_REPORT_TO = 'rljr.code@gmail.com'
@@ -310,17 +310,29 @@ def tree_report_details(account, checks, outcome):
     return '\n'.join(lines)
 
 
-def queue_tree_report(state, account):
-    record = state['accounts'][account]
-    report = {'id': uuid4().hex, 'account': account, 'recipient': TREE_REPORT_TO,
-              'subject': f'Dragonkind tree check: CONTINUED - {account}',
-              'body': tree_report_details(account, record['tree_checkpoint_checks'],
-                    'CONTINUED: no shadow or third option found; Climb down slowly and Next Scene submitted.'),
-              'next_attempt': 0, 'attempts': 0}
+def finish_rotation_report(state, aborted=False):
+    rotation = state.get('reporting_rotation')
+    if rotation is None or not (aborted or rotation_ready(state)):
+        return
+    subject, body = rotation_summary(state, tree_report_details, aborted)
+    report = {'id': rotation['id'], 'kind': 'rotation', 'recipient': TREE_REPORT_TO,
+              'subject': subject, 'body': body, 'next_attempt': 0, 'attempts': 0}
     state.setdefault('tree_report_outbox', []).append(report)
-    record['last_tree_report'] = {'id': report['id'], 'status': 'pending'}
+    state['last_rotation_report'] = {'id': report['id'], 'status': 'pending'}
+    for account in rotation['accounts']:
+        state['accounts'].get(account, {}).pop('notification_deferred', None)
+    state.pop('reporting_rotation')
+    state.pop('deferred_tree_reports', None)
     save_state(STATE, state)
-    deliver_tree_reports(state)
+
+
+def migrate_individual_reports(state):
+    # Retain old undelivered checks in the next summary without mailing them one by one.
+    outbox = state.get('tree_report_outbox', [])
+    old = [report for report in outbox if report.get('kind') != 'rotation']
+    if old:
+        state.setdefault('deferred_tree_reports', []).extend(old)
+        state['tree_report_outbox'] = [report for report in outbox if report.get('kind') == 'rotation']
 
 
 def deliver_tree_reports(state):
@@ -332,13 +344,13 @@ def deliver_tree_reports(state):
         except Exception:
             report['attempts'] += 1
             report['next_attempt'] = time.time() + MAIL_RETRY_SECONDS
-            print('Tree-check email queued for automatic retry.', flush=True)
+            print('Rotation summary queued for automatic retry.', flush=True)
         else:
             state['tree_report_outbox'].remove(report)
-            record = state['accounts'].get(report['account'], {})
-            if record.get('last_tree_report', {}).get('id') == report['id']:
-                record['last_tree_report'].update(status='sent', sent_at=datetime.now().astimezone().isoformat())
-            print(f'Tree-check email sent to {report["recipient"]} for {report["account"]}.', flush=True)
+            record = state.get('last_rotation_report', {})
+            if record.get('id') == report['id']:
+                record.update(status='sent', sent_at=datetime.now().astimezone().isoformat())
+            print(f'Rotation summary sent to {report["recipient"]}.', flush=True)
         save_state(STATE, state)
 
 
@@ -347,8 +359,12 @@ def retry_pending_notifications(state, accounts):
     for account in accounts:
         record = state['accounts'].get(account, {})
         if record.get('notification_pending') and record.get('notification_retry_at', 0) <= time.time():
-            alert(state, account, record.get('reason', 'Paused'),
-                  global_pause=record.get('pause_scope', 'global') == 'global')
+            if record.get('notification_urgent') or 'shadow' in record.get('reason', '').casefold():
+                alert(state, account, record.get('reason', 'Paused'),
+                      global_pause=record.get('pause_scope', 'global') == 'global', immediate=True)
+            else:
+                record.update(notification_pending=False, notification_deferred=True)
+                save_state(STATE, state)
 
 
 def notifications_pending(state, accounts):
@@ -734,8 +750,10 @@ def logout_after_death(page):
     logout_from_profile(page)
 
 
-def alert(state, account, reason, page=None, global_pause=True, details=None, recipient=None):
+def alert(state, account, reason, page=None, global_pause=True, details=None, recipient=None, immediate=None):
     record = state['accounts'].setdefault(account, {})
+    if immediate is None:
+        immediate = 'shadow' in reason.casefold()
     if details is not None:
         record['notification_details'] = details
     elif record.get('reason') != reason:
@@ -744,7 +762,8 @@ def alert(state, account, reason, page=None, global_pause=True, details=None, re
         record['notification_recipient'] = recipient
     elif record.get('reason') != reason:
         record.pop('notification_recipient', None)
-    record.update(status='paused', reason=reason, notification_pending=True,
+    record.update(status='paused', reason=reason, notification_pending=immediate,
+                  notification_urgent=immediate, notification_deferred=not immediate,
                   pause_scope='global' if global_pause else 'account')
     state['global_pause'] = state['global_pause'] or global_pause
     save_state(STATE, state)  # Persist the pause even if screenshot or mail fails.
@@ -754,13 +773,16 @@ def alert(state, account, reason, page=None, global_pause=True, details=None, re
             page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
         except Exception:
             pass
+    if not immediate:
+        print('Pause details will be included in the end-of-rotation summary.', flush=True)
+        return
     try:
         notify('Dragonkind automation paused',
                f'Account: {account}\nReason: {reason}\nStep: {record.get("step", 0)}\n'
                'No further choices will be made for this paused scope.'
                + ('\n\n' + record['notification_details'] if record.get('notification_details')
                   else '\nReview the local screenshot and state.'),
-               recipient=record.get('notification_recipient'))
+               recipient=record.get('notification_recipient') or TREE_REPORT_TO)
         record['notification_pending'] = False
         record.pop('notification_retry_at', None)
         save_state(STATE, state)
@@ -793,6 +815,7 @@ def play(browser, route, state, account, restart_browser=None):
         return page
     try:
         record.update(status='active', step=0)
+        record.pop('tree_checkpoint_checks', None)
         record.pop('login_diagnostic', None)
         record.pop('story_diagnostic', None)
         save_state(STATE, state)
@@ -858,8 +881,6 @@ def play(browser, route, state, account, restart_browser=None):
                 resume_pending = True
             execute_choice(page, story_controls(page).nth(rows[selection]['index']),
                            before_action=checkpoint_guard)
-            if checkpoint_guard is not None:
-                queue_tree_report(state, account)
             index += 1
         wait_story_ready(page)
         if not visible(page, 'DEATH_SELECTOR').count():
@@ -882,7 +903,8 @@ def play(browser, route, state, account, restart_browser=None):
         details = tree_report_details(account, checks, f'PAUSED: {error}')
         alert(state, account, str(error), page,
               global_pause=os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global',
-              details=details, recipient=TREE_REPORT_TO)
+              details=details, recipient=TREE_REPORT_TO,
+              immediate=any(check['shadow_found'] for check in checks))
     except Exception as error:
         if not story_started:
             record['login_diagnostic'] = login_page_status(page)
@@ -930,6 +952,7 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
     route = configuration()
     state = load_state(STATE)
     active_accounts = route['accounts']
+    migrate_individual_reports(state)
     refresh_global_pause(state, active_accounts)
     if retry_rejected:
         retried = retry_login_rejections(state, active_accounts)
@@ -937,6 +960,7 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
     if resume_stories:
         resumed = resume_story_failures(state, active_accounts)
         print('Rechecking saved story failures against the visible site: ' + (', '.join(resumed) or 'none'), flush=True)
+    recover_finished_result(state, active_accounts)
     save_state(STATE, state)
     print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
     print('Browser mode: ' + ('headless (no visible windows).' if headless else 'visible Chromium.'), flush=True)
@@ -948,7 +972,17 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
     last_schedule = None
     while True:
         retry_pending_notifications(state, active_accounts)
+        if state.get('reporting_rotation'):
+            begin_rotation(state, active_accounts)
+            finish_rotation_report(state, aborted=state['global_pause'])
+            save_state(STATE, state)
+            deliver_tree_reports(state)
+        deferred = any(state['accounts'].get(account, {}).get('notification_deferred') for account in active_accounts)
         if state['global_pause']:
+            if state.get('reporting_rotation') or deferred or state.get('deferred_tree_reports'):
+                begin_rotation(state, active_accounts)
+                finish_rotation_report(state, aborted=True)
+                deliver_tree_reports(state)
             if not notifications_pending(state, active_accounts):
                 print('Global pause is active. Review the emailed update or saved state.')
                 return
@@ -965,14 +999,26 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
                     record = state['accounts'].get(account, {})
                     if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
                         continue
+                    begin_rotation(state, active_accounts)['in_progress'] = account
+                    save_state(STATE, state)
                     run_account(playwright, route, state, account, headless=headless)
+                    record_result(state, active_accounts, account)
+                    save_state(STATE, state)
                     if state['global_pause']:
                         print('Global pause is active; the remaining accounts have not been started. Review data/state.json.', flush=True)
                         break
+                    finish_rotation_report(state)
+            deliver_tree_reports(state)
         if state['global_pause']:
             continue
         scheduled = next_attempt(state, active_accounts, time.time())
         if scheduled is None:
+            if (state.get('reporting_rotation') or state.get('deferred_tree_reports')
+                    or any(state['accounts'].get(account, {}).get('notification_deferred')
+                           for account in active_accounts)):
+                begin_rotation(state, active_accounts)
+                finish_rotation_report(state)
+                deliver_tree_reports(state)
             if notifications_pending(state, active_accounts):
                 print('All accounts are paused; waiting to retry pending emails with browsers closed.', flush=True)
                 time.sleep(60)
