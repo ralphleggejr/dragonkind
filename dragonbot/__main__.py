@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
-from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError
+from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError, matching_choices
 from .mail import highwater, inbox, notify, wait_code
 from .runtime import AlreadyRunningError, next_attempt, state_lock
 
@@ -141,7 +141,7 @@ def story_control_snapshot(page, controls=None):
     }""")
 
 
-def read_story_controls(page):
+def read_story_controls(page, wait_all_choices=True):
     if os.environ.get('LOGIN_FLOW', 'recorded') == 'recorded':
         # Re-evaluate live DOM/styles: layout visibility alone also includes opacity:0.
         page.wait_for_function("""() => {
@@ -152,7 +152,7 @@ def read_story_controls(page):
         }""")
     rows = [row for row in story_control_snapshot(page) if row['painted']]
     labels = [row for row in rows if row['tag'] == 'LABEL']
-    if labels:
+    if labels and wait_all_choices:
         # Each choice can reveal separately. Include every current option in shadow checks.
         label = story_controls(page).nth(labels[0]['index'])
         group = label.evaluate_handle("(element) => element.control?.form || element.closest('form') || element.parentElement")
@@ -174,6 +174,99 @@ def read_story_controls(page):
             group.dispose()
         rows = [row for row in story_control_snapshot(page) if row['painted']]
     return rows
+
+
+class TreeCheckpointReview(StoryPositionError):
+    """Stop this account before advancing past an unusual post-tree choice."""
+
+
+TREE_OPTIONS_JS = """(group) => {
+    const painted = """ + PAINTED_ELEMENT_JS + """;
+    const inputs = [...group.querySelectorAll('input[type="radio"]')];
+    // Inspect the whole active group, independent of CHOICES_SELECTOR or visibility.
+    const labels = [...new Set([...group.querySelectorAll('label[for^="choice-"]'),
+        ...inputs.flatMap(input => [...input.labels])])];
+    const options = labels.map(label => ({
+        text: (label.textContent || '').trim(), control: label.getAttribute('for'),
+        painted: painted(label),
+        enabled: label.control?.type === 'radio' && !label.control.disabled
+    }));
+    for (const input of inputs) {
+        if (!labels.some(label => label.control === input)) {
+            options.push({text: '[Unlabelled radio option]', control: input.id,
+                painted: false, enabled: false});
+        }
+    }
+    const animating = group.getAnimations({subtree: true}).some(animation =>
+        Number.isFinite(animation.effect?.getComputedTiming().endTime) &&
+        (animation.pending || animation.playState === 'running'));
+    return {options, settled: group.isConnected && options.length > 0 &&
+        options.every(option => option.painted) && !animating};
+}"""
+
+
+def tree_choice_group(page, rows):
+    label = next((row for row in rows if row['tag'] == 'LABEL'), None)
+    if label is None:
+        return None
+    return story_controls(page).nth(label['index']).evaluate_handle(
+        "(element) => element.control?.form || element.closest('form') || element.parentElement")
+
+
+def check_tree_checkpoint(page, state, account, stage, expected=None):
+    record = state['accounts'][account]
+    if stage == 'initial':
+        record['tree_checkpoint_checks'] = []
+    rows = read_story_controls(page, wait_all_choices=False)
+    group = tree_choice_group(page, rows)
+
+    def inspect(snapshot, check_stage):
+        options = snapshot['options']
+        labels = [option['text'] for option in options]
+        entry = {'checked_at': datetime.now().astimezone().isoformat(), 'stage': check_stage,
+                 'option_count': len(options), 'shadow_found': shadow(labels),
+                 'settled': snapshot['settled'], 'options': options}
+        record.setdefault('tree_checkpoint_checks', []).append(entry)
+        save_state(STATE, state)
+        print(f'Tree checkpoint for {account}: ' + json.dumps(entry), flush=True)
+        if entry['shadow_found']:
+            raise TreeCheckpointReview('A post-tree story option mentions shadow')
+        if len(options) != 2:
+            raise TreeCheckpointReview(f'Tree checkpoint has {len(options)} options; expected exactly 2')
+        if any(not option['enabled'] or not option['text'] for option in options):
+            raise TreeCheckpointReview('Tree checkpoint has an unlabelled or unavailable option')
+        fingerprint = [(option['control'], option['text']) for option in options]
+        if expected is not None and fingerprint != expected:
+            raise TreeCheckpointReview('Tree checkpoint options changed between safety checks')
+        return fingerprint
+
+    try:
+        if group is None:
+            # Custom routes may expose option buttons instead of radio labels.
+            snapshot = {'options': [{'text': row['text'], 'control': None,
+                                    'painted': True, 'enabled': True}
+                                   for row in rows if row['tag'] == 'BUTTON'], 'settled': True}
+        else:
+            snapshot = group.evaluate(TREE_OPTIONS_JS)
+        fingerprint = inspect(snapshot, stage)
+        if group is not None and not snapshot['settled']:
+            print('Tree checkpoint: waiting for all options and their reveal animations to finish.', flush=True)
+            page.wait_for_function("""(group) => {
+                const inspect = """ + TREE_OPTIONS_JS + """;
+                const snapshot = inspect(group);
+                // Wake immediately if a new/hidden third option or shadow appears.
+                return !group.isConnected || snapshot.options.length !== 2 ||
+                    snapshot.options.some(option => option.text.toLowerCase().includes('shadow')) ||
+                    snapshot.settled;
+            }""", arg=group)
+            snapshot = group.evaluate(TREE_OPTIONS_JS)
+            fingerprint = inspect(snapshot, stage + ' after reveal')
+        if not snapshot['settled']:
+            raise TreeCheckpointReview('Tree checkpoint options did not finish revealing')
+        return read_story_controls(page, wait_all_choices=False), fingerprint
+    finally:
+        if group is not None:
+            group.dispose()
 
 
 def story_page_status(page):
@@ -262,10 +355,12 @@ def request_login_email(page, account, before_request=None, restart_page=None):
                 prepare_login(page)
 
 
-def click_transition(page, target):
+def click_transition(page, target, before_click=None):
     wait_rendered(page, target)
     before = page.locator('body').inner_text()
     url = page.url
+    if before_click is not None:
+        before_click()
     target.click()
     page.wait_for_function('(old) => location.href !== old.url || (document.body && document.body.innerText !== old.text)',
                            arg={'text': before, 'url': url})
@@ -273,9 +368,10 @@ def click_transition(page, target):
     page.wait_for_load_state('domcontentloaded')
 
 
-def execute_choice(page, selection):
+def execute_choice(page, selection, before_action=None):
     if selection.evaluate('(element) => element.tagName') != 'LABEL':
-        click_transition(page, selection)
+        click_transition(page, selection, before_click=(
+            lambda: before_action('before selection')) if before_action is not None else None)
         return
     control_id = selection.get_attribute('for')
     if not control_id:
@@ -288,6 +384,8 @@ def execute_choice(page, selection):
         raise RuntimeError('Choice label does not identify an enabled radio input')
     # The site intentionally dims unselected labels when a saved radio is checked.
     # Playwright still waits for the label to be visible, stable, and clickable.
+    if before_action is not None:
+        before_action('before selection')
     selection.click()
     page.wait_for_function('(id) => document.getElementById(id)?.checked === true', arg=control_id)
     # Selection alone does not advance the story; submit only after it is checked.
@@ -295,7 +393,8 @@ def execute_choice(page, selection):
     submit.first.wait_for(state='visible')
     if submit.count() != 1:
         raise RuntimeError('Expected one visible choice submit button')
-    click_transition(page, submit)
+    click_transition(page, submit, before_click=(
+        lambda: before_action('before submission')) if before_action is not None else None)
 
 
 def report_login_progress(stage, progress=None):
@@ -461,17 +560,24 @@ def inspect_resumed_story(page, route, state, account):
         story_controls(page).or_(result).or_(terminal).first.wait_for(state='visible')
         if terminal.count():
             return len(route['steps'])
-        rows = read_story_controls(page)
+        rows = read_story_controls(page, wait_all_choices=False)
         choices = [row for row in rows if row['tag'] == 'LABEL']
         if choices:
+            # A resumed tree page gets the same count/hidden-option guard as a new
+            # run, before waiting on a potentially hidden extra option.
+            group = tree_choice_group(page, rows)
+            try:
+                all_labels = [option['text'] for option in group.evaluate(TREE_OPTIONS_JS)['options']]
+            finally:
+                group.dispose()
+            if matching_choices(all_labels, route['steps'][route['shadow_checkpoint']]):
+                return route['shadow_checkpoint']
+            rows = read_story_controls(page)
+            choices = [row for row in rows if row['tag'] == 'LABEL']
             labels = [row['text'] for row in choices]
             index = locate_story_step(labels, route['steps'])
             state['accounts'][account]['step'] = index
             save_state(STATE, state)
-            if index == route['shadow_checkpoint'] and shadow(labels):
-                alert(state, account, 'A story option mentions shadow', page,
-                      os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
-                return None
             print(f'Resuming at story step {index + 1}, identified from the visible choices.', flush=True)
             return index
         results = [row for row in story_control_snapshot(page, result) if row['painted']]
@@ -538,8 +644,12 @@ def logout_after_death(page):
     logout_from_profile(page)
 
 
-def alert(state, account, reason, page=None, global_pause=True):
+def alert(state, account, reason, page=None, global_pause=True, details=None):
     record = state['accounts'].setdefault(account, {})
+    if details is not None:
+        record['notification_details'] = details
+    elif record.get('reason') != reason:
+        record.pop('notification_details', None)
     record.update(status='paused', reason=reason, notification_pending=True,
                   pause_scope='global' if global_pause else 'account')
     state['global_pause'] = state['global_pause'] or global_pause
@@ -553,7 +663,8 @@ def alert(state, account, reason, page=None, global_pause=True):
     try:
         notify('Dragonkind automation paused',
                f'Account: {account}\nReason: {reason}\nStep: {record.get("step", 0)}\n'
-               'Review the local screenshot and state. No further choices will be made for this paused scope.')
+               'Review the local screenshot and state. No further choices will be made for this paused scope.'
+               + ('\n\n' + record['notification_details'] if record.get('notification_details') else ''))
         record['notification_pending'] = False
         save_state(STATE, state)
     except Exception:
@@ -634,17 +745,20 @@ def play(browser, route, state, account, restart_browser=None):
             wait_story_ready(page)
             if finish_known_death_pages(page):
                 break
-            rows = read_story_controls(page)
+            checkpoint_guard = None
+            if index == route['shadow_checkpoint']:
+                rows, expected = check_tree_checkpoint(page, state, account, 'initial')
+                def checkpoint_guard(stage):
+                    check_tree_checkpoint(page, state, account, stage, expected=expected)
+            else:
+                rows = read_story_controls(page)
             labels = [row['text'] for row in rows]
-            if index == route['shadow_checkpoint'] and shadow(labels):
-                alert(state, account, 'A story option mentions shadow', page,
-                      os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global')
-                return
             selection = choose(labels, options, allow_contains=options == ['Hope for the best'])
             print(f'Story step {index + 1}: {labels[selection].strip()}', flush=True)
             if index < 2 and normalized(labels[selection]) == 'continue your story':
                 resume_pending = True
-            execute_choice(page, story_controls(page).nth(rows[selection]['index']))
+            execute_choice(page, story_controls(page).nth(rows[selection]['index']),
+                           before_action=checkpoint_guard)
             index += 1
         wait_story_ready(page)
         if not visible(page, 'DEATH_SELECTOR').count():
@@ -662,6 +776,15 @@ def play(browser, route, state, account, restart_browser=None):
         record.update(status='cooldown', step=0)
         save_state(STATE, state)
         print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)
+    except TreeCheckpointReview as error:
+        checks = record.get('tree_checkpoint_checks', [])
+        latest = checks[-1] if checks else {}
+        details = (f'Tree checkpoint check: {latest.get("stage", "unknown")}\n'
+                   f'Options found: {latest.get("option_count", 0)}\n'
+                   + '\n'.join(f'{index}. {option["text"]}'
+                               for index, option in enumerate(latest.get('options', []), 1)))
+        alert(state, account, str(error), page,
+              global_pause=os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global', details=details)
     except Exception as error:
         if not story_started:
             record['login_diagnostic'] = login_page_status(page)

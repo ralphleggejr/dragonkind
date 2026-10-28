@@ -65,6 +65,23 @@ class Decisions(unittest.TestCase):
         self.assertFalse(shadow([]))
         self.assertFalse(shadow(['a', 'b']))
 
+    def test_tree_pause_email_retry_retains_option_details_and_account_scope(self):
+        from dragonbot.__main__ import alert
+        details = 'Options found: 3\n1. Climb down slowly\n2. Wait\n3. Follow the shadow'
+        state = {'accounts': {'one@gmail.com': {'step': 18, 'next_run': 9000}}, 'global_pause': False}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            with patch('dragonbot.__main__.STATE', path), \
+                 patch('dragonbot.__main__.notify', side_effect=[RuntimeError(), None]) as mail:
+                alert(state, 'one@gmail.com', 'Tree checkpoint needs review', global_pause=False, details=details)
+                self.assertTrue(load_state(path)['accounts']['one@gmail.com']['notification_pending'])
+                alert(state, 'one@gmail.com', 'Tree checkpoint needs review', global_pause=False)
+                self.assertIn(details, mail.call_args.args[1])
+                saved = load_state(path)
+                self.assertFalse(saved['accounts']['one@gmail.com']['notification_pending'])
+                self.assertEqual(saved['accounts']['one@gmail.com']['next_run'], 9000)
+                self.assertFalse(saved['global_pause'])
+
     def test_hope_requires_unique_match(self):
         self.assertEqual(choose(['Run', 'Close your eyes. Hope for the best!'],
                                 ['Hope for the best'], True), 1)

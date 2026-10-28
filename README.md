@@ -1,6 +1,6 @@
 # Dragonkind automation
 
-Dockerized Python/Playwright runner for eight active accounts. **All eight accounts completed one native Mac rotation in live testing. Native headless mode, background service operation, and Docker login still require live validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
+Dockerized Python/Playwright runner for eight active accounts. **All eight accounts completed a native Mac rotation, and the four-hour replay has been confirmed live. Native headless login returned HTTP 422; use visible Chromium on the Mac. Live shadow handling and Docker login still require validation.** The runner refuses to start until required configuration is supplied. It uses your explicit route rather than guessing which action is deadliest.
 
 ## Run every four hours without keeping Terminal open
 
@@ -46,6 +46,22 @@ This also disables automatic starts at login. Start it again with `bash scripts/
 
 For a foreground windowless run instead, use `bash scripts/run-mac.sh --headless`. It still stops when that Terminal process exits; use the service for unattended scheduling.
 
+### Update the post-tree shadow guard on an existing Mac service
+
+Wait until the bot is between attempts, with its browser closed, before updating. Stopping during an active story requires reviewing its interrupted-run pause. From the checkout already moved to Projects:
+
+```bash
+cd "$HOME/Projects/dragonkind-git" &&
+bash scripts/service-mac.sh stop &&
+git pull --ff-only &&
+bash scripts/service-mac.sh start &&
+bash scripts/service-mac.sh status
+```
+
+This preserves `.env`, account pauses, and all four-hour cooldowns. No reinstall or headless switch is needed. View checks with `tail -f data/dragonbot.log`; look for `Tree checkpoint for` lines containing the account, timestamp, check stage, option count, shadow flag, and every option's full text and visibility. The latest attempt's checks are also saved under that account's `tree_checkpoint_checks` in `data/state.json`.
+
+At the post-tree choice, the bot inspects the entire active radio group, including hidden labels and options omitted by a configured selector. It requires exactly two labelled, enabled options with no mention of shadow, waits for their finite reveal animations, then checks fresh DOM snapshots **before selecting Climb down slowly and again immediately before submitting Next Scene**. More than two options, a shadow in either of just two options, changed labels/order between checks, or an unlabelled/unavailable option pauses only that account. The pause email lists the detected options; a screenshot and the saved checks remain local. Paused accounts are excluded from later four-hour replays until reviewed. These guards cover resumed stories too. Options appearing after initial inspection are checked again before either action; the bot cannot predict future content the site has not yet added to the page.
+
 ### Docker background mode on Mac or Windows
 
 Docker already runs Chromium headlessly. Compose now forces the recorded login flow/casing used by the successful native runner, retains account state in `./data`, and retries a crashed process up to three times. Verify the current Docker runtime separately before leaving it unattended:
@@ -65,13 +81,13 @@ Docker cannot prevent its host from sleeping. On Windows, keep Docker Desktop ru
 - Run accounts sequentially, requesting a fresh verification code for each login. Forward the full original email, including its original From/To headers, to `rljr.code@gmail.com` **after** the console asks for that account's code. If that account receives its code directly in this inbox, no forwarding is necessary. Do not forward stripped-down code-only messages or quoted email threads containing multiple codes.
 - Only new inbox messages received after the request boundary are considered. Match the intended account, original sender, and one unique code. Inbox messages are read without marking them read or deleting them. Codes and credentials are not deliberately logged or persisted.
 - Follow `route.json`. A radio choice plus its “Next Scene” submission is one route step; Continue and Brave Threshing controls are separate steps. Text matching ignores case, spacing, curly apostrophes, and final punctuation. Full labels require a unique exact match. The two remaining truncated labels from codegen use explicit word-boundary prefixes and still require one unique option. The current post-tree route follows “Climb down slowly to pursue…” and then “Lower your eyes but keep your…”.
-- At the configured checkpoint, pause that account if any visible choice label mentions “shadow.” Send an email update to `rljr.code@gmail.com`, save a local screenshot, close that browser context and its browser process, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
+- At the configured post-tree checkpoint, log every option and its count, including hidden options in the active group. Require exactly two options without “shadow,” and recheck before selection and before Next Scene submission. Any extra option, shadow mention, or changed option list pauses only that account and sends its option list to `rljr.code@gmail.com`. Save a local screenshot and timestamped checks, close the browser, and continue other accounts. This does not preserve a live browser; review may require manually signing in again.
 - Follow the latest recorded ending: two or three Continue buttons, then the Continue link to Rotunda. Require the visible `#cooldown-label` before saving that account's four-hour cooldown and clicking Profile → Sign out. Known terminal death messages remain supported for earlier endings. A generic Continue button alone never confirms completion. Confirm the email login form before moving to the next eligible account. Cooldowns and pauses survive restarts in `data/state.json`.
 - Unexpected pages, ambiguous choices, timeouts, mail failures, or interrupted active runs pause the entire runner for review. It never solves CAPTCHAs or bypasses MFA. A failed notification leaves a persistent pending flag for retry on restart.
 
 ## Before you start
 
-This is a prototype with one completed eight-account native Mac rotation. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA, both recorded dragon branches, site cooldown confirmation, logout, and handoff through all eight accounts have succeeded on the Mac. Headless/background operation, repeating after four hours, live shadow handling, and Docker login still need live validation. You must supply the website selectors and verification sender below before starting real account attempts.
+This is a prototype with a completed eight-account native Mac rotation and a user-confirmed four-hour replay. Docker configuration and local browser simulations have been tested, and the Docker image built successfully on the user’s Mac. Gmail IMAP/SMTP authentication, native Mac email submission, and forwarding have succeeded in user testing. Native automatic MFA, both recorded dragon branches, site cooldown confirmation, logout, and handoff through all eight accounts have succeeded on the Mac. Native headless login returned HTTP 422. Live shadow handling and Docker login still need validation. You must supply the website selectors and verification sender below before starting real account attempts.
 
 Download or clone a copy of this project that contains `Dockerfile`, `compose.yaml`, `.env.example`, `route.json`, and the `dragonbot` folder. If GitHub still shows only the original README and LICENSE, the automation files have not been pushed there yet; cloning that version will not provide the app. The initial Docker examples use `~/Downloads/dragonkind`; the working Git checkout uses `~/Downloads/dragonkind-git`. The native background setup above moves the whole checkout to `~/Projects/dragonkind-git`; use that location afterward.
 
@@ -328,7 +344,7 @@ The launcher reads your local `.env` and runs the full scheduler with native **v
 
 If a logged-in account already shows a site cooldown, the runner signs out, saves that account's advertised `data-countdown`/`datetime` deadline when available (otherwise a conservative four-hour delay), and moves on. An already-started game uses the recorded Continue your story entry and identifies its current position from visible choice labels. It can reveal up to three Continue-only pages to find a known choice or a result link. Unknown or ambiguous choices still pause; it never infers story position from `/play` alone. Confirmed bot deaths retain their separate four-hour cooldowns. The shadow checkpoint pauses only that account by default; other unexpected failures still pause the scheduler for review.
 
-One full visible-browser Mac rotation has completed for all eight accounts, including both recorded dragon branches, cooldown confirmation, logout, and account handoff. Headless/background operation, repeated four-hour cycles, live shadow handling, and unattended operation still need validation. Docker deployment remains supported by its existing commands but its login rejection has not yet been resolved.
+One full visible-browser Mac rotation has completed for all eight accounts, including both recorded dragon branches, cooldown confirmation, logout, and account handoff. The user has also confirmed the four-hour replay. Native headless login returned HTTP 422, so keep the visible browser mode. Live shadow handling and Docker login still need validation.
 
 If the browser closes and the Terminal prompt returns after the first account, inspect `data/state.json`. A global pause stops the remaining accounts even when all addresses are configured. The console now prints the pause reason and distinguishes entering MFA, waiting for the verification form to close, waiting for authenticated controls, and waiting for the story start/cooldown panel. `Login confirmed (authenticated)` means that a logged-in control such as Profile was found; the scheduler still needs a recognized Brave Threshing/Continue your story entry or the site's cooldown panel before proceeding.
 
@@ -336,7 +352,7 @@ Failures before the story starts also save `login_diagnostic` in that account's 
 
 ## Apply the latest recorded story path and inspect resumed games
 
-The eight-account rotation accepts Brave Threshing or Continue your story for both entry controls. The brown-dragon choice is exactly “Lower your eyes and turn to face it”; the red choice is exactly “Lower your eyes in respect”. The old “Lower your eyes and hold still” option is no longer an accepted route choice because the brown page presents it alongside the recorded face-it option. At the tree, it checks every visible option for shadow before selecting the unique “Climb down slowly to pursue…” option. The route then clicks Continue twice and selects the unique “Lower your eyes but keep your…” option. It uses a single click and verifies the radio selection before Next Scene; the recorded double-click is unnecessary.
+The eight-account rotation accepts Brave Threshing or Continue your story for both entry controls. The brown-dragon choice is exactly “Lower your eyes and turn to face it”; the red choice is exactly “Lower your eyes in respect”. The old “Lower your eyes and hold still” option is no longer an accepted route choice because the brown page presents it alongside the recorded face-it option. At the tree, it counts and logs all current options, including hidden labels, and pauses that account on more than two options or any shadow mention. The safe two-option list is checked again before selecting the unique “Climb down slowly to pursue…” option and before submitting Next Scene. The route then clicks Continue twice and selects the unique “Lower your eyes but keep your…” option. It uses a single click and verifies the radio selection before Next Scene; the recorded double-click is unnecessary.
 
 A resumed game can begin at a known choice further along this route. The bot identifies the step from the labels actually visible, rather than replaying earlier choices or trusting a saved index. Continue-only pages reveal up to three pages to find a known choice or the result link. The result must lead to Rotunda and show the real cooldown label. Controls must finish appearing before clicks; each browser wait retains its five-minute maximum.
 
@@ -375,4 +391,4 @@ bash scripts/run-mac.sh --resume-stories --retry-login-errors
 
 The reset command clears only the restored account's old local pause and retains its saved cooldown deadline. It does not reset the website. The launcher also rechecks saved story failures and previous HTTP 422 login rejections for active accounts. Other shadow pauses and cooldown deadlines remain saved. Do not delete `data/state.json`; accounts whose deadlines are already past will run automatically, and a live site cooldown is checked after login.
 
-Live output now confirms one complete visible-browser rotation for all eight accounts. The original runner was waiting for the next four-hour deadline when Control+C stopped it. Scheduling, resource cleanup between attempts, file locking, headless flag propagation, clean stopping, and LaunchAgent configuration are tested locally. The native service still needs installation on the Mac, and headless login must pass the provided live preflight.
+Live output confirms a complete visible-browser rotation for all eight accounts, and the user has confirmed the four-hour replay. Scheduling, resource cleanup between attempts, file locking, clean stopping, LaunchAgent configuration, and the post-tree count/repeated-check guards are tested locally. Native headless login returned HTTP 422; keep the working visible browser mode. The new shadow/count guard still needs a live event to validate it against the site.

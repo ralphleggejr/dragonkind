@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
-from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status, story_page_status, click_transition
+from dragonbot.__main__ import play, prepare_login, complete_mfa, execute_choice, logout_after_death, finish_known_death_pages, configure_page, wait_story_ready, fill_login_email, submit_login_code_request, LoginRequestRejected, page_timeout_ms, inspect_login_submission, wait_rendered, request_login_email, replay_login_page, mail_login_page, confirm_login, account_ready_for_story, login_page_status, story_page_status, click_transition, check_tree_checkpoint, TreeCheckpointReview
 
 ROUTE = json.loads(Path('route.json').read_text())
 
@@ -317,7 +317,8 @@ class BrowserFlow(unittest.TestCase):
                                   shadow_option=False, cooldown=True, direct_play=False, known_narrative=False,
                                   resume_scene=0, transparent_future=False, delayed_shadow=False, unknown_resume=False,
                                   role_only_continue=False, staggered_valley=False, hidden_shadow=False,
-                                  never_reveal_valley=False):
+                                  never_reveal_valley=False, extra_option=None, hidden_extra=False,
+                                  notification_bodies=None):
         account = ROUTE['accounts'][0]
         context = self.browser.new_context()
         requests, selected = [], []
@@ -354,7 +355,7 @@ class BrowserFlow(unittest.TestCase):
                 } else {
                     let options=[label, 'Another choice'];
                     if(scene===4 && !RED_DRAGON) options=['Run and hope it didn’t see you', 'Lower your eyes and hold still', label];
-                    if(SHADOW && scene===16) options.push('Follow the shadow');
+                    if(scene===16 && (SHADOW || EXTRA_OPTION!==null)) options.push(EXTRA_OPTION || 'Follow the shadow');
                     if(STAGGERED_VALLEY && scene===2) options=['Enter the valley with two of your squadmates', 'Enter the valley with three of your squadmates', label];
                     document.body.innerHTML=`<p>Scene ${scene}</p><form id="choices" onsubmit="event.preventDefault();const input=this.querySelector(':checked');if(input){captureChoice(this.querySelector('label[for='+input.id+']').textContent);next()}">`+
                       options.map((text,i)=>`<div class="choice ${STAGGERED_VALLEY && scene===2 && i>0 ? 'late-option' : ''}" style="animation-delay:${i*.15}s"><input hidden type="radio" required name="choice" id="choice-${i}" value="${i}"><label for="choice-${i}">${text}</label></div>`).join('')+
@@ -371,11 +372,12 @@ class BrowserFlow(unittest.TestCase):
                         const shadow=document.querySelector('label[for="choice-2"]');
                         shadow.style.visibility='hidden';setTimeout(()=>shadow.style.visibility='visible', 150);
                     }
+                    if(HIDDEN_EXTRA && scene===16) document.querySelector('label[for="choice-2"]').hidden=true;
                 }
                 appendFuture();
             }
             function next(){scene++;draw()} draw();
-            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('HIDDEN_SHADOW', json.dumps(hidden_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future)).replace('STAGGERED_VALLEY', json.dumps(staggered_valley)).replace('NEVER_REVEAL_VALLEY', json.dumps(never_reveal_valley)).replace('RED_DRAGON', json.dumps(red))
+            </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('ENDING', str(ending_pages)).replace('EXTRA_OPTION', json.dumps(extra_option)).replace('HIDDEN_EXTRA', json.dumps(hidden_extra)).replace('DELAYED_SHADOW', json.dumps(delayed_shadow)).replace('HIDDEN_SHADOW', json.dumps(hidden_shadow)).replace('SHADOW', json.dumps(shadow_option)).replace('KNOWN_NARRATIVE', json.dumps(known_narrative)).replace('START_SCENE', str(resume_scene)).replace('TRANSPARENT_FUTURE', json.dumps(transparent_future)).replace('STAGGERED_VALLEY', json.dumps(staggered_valley)).replace('NEVER_REVEAL_VALLEY', json.dumps(never_reveal_valley)).replace('RED_DRAGON', json.dumps(red))
         if role_only_continue:
             play_html = play_html.replace('data-page-next', '')
         def site(route):
@@ -416,6 +418,8 @@ class BrowserFlow(unittest.TestCase):
                  patch('dragonbot.__main__.notify') as notify, patch('playwright.sync_api.Page.screenshot'):
                 play(wrapped, ROUTE, state, account)
                 saved = json.loads((Path(directory) / 'state.json').read_text())
+                if notification_bodies is not None:
+                    notification_bodies.extend(call.args[1] for call in notify.call_args_list)
         return saved, requests, selected, notify.call_count
 
     def test_new_brown_walkthrough_reaches_cooldown_and_signs_out(self):
@@ -457,6 +461,153 @@ class BrowserFlow(unittest.TestCase):
         self.assertNotIn('Climb down slowly to pursue the sound', selected)
         self.assertEqual(requests.count('/rotunda'), 1)
         self.assertEqual(emails, 1)
+
+    def test_tree_third_option_without_shadow_pauses_and_emails_all_labels(self):
+        notifications = []
+        state, requests, selected, emails = self.exercise_latest_recording(
+            extra_option='Follow an unfamiliar movement', notification_bodies=notifications)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['step'], ROUTE['shadow_checkpoint'])
+        self.assertEqual(record['pause_scope'], 'account')
+        self.assertFalse(state['global_pause'])
+        self.assertNotIn('Climb down slowly to pursue the sound', selected)
+        self.assertEqual(requests.count('/rotunda'), 1)
+        self.assertEqual(emails, 1)
+        check = record['tree_checkpoint_checks'][-1]
+        self.assertEqual(check['option_count'], 3)
+        self.assertFalse(check['shadow_found'])
+        self.assertIn('Options found: 3', notifications[0])
+        for option in check['options']:
+            self.assertIn(option['text'], notifications[0])
+
+    def test_resumed_tree_counts_a_never_visible_third_option(self):
+        state, _, selected, emails = self.exercise_latest_recording(
+            resumed=True, resume_scene=16, extra_option='Follow the mysterious shape', hidden_extra=True)
+        record = state['accounts'][ROUTE['accounts'][0]]
+        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['pause_scope'], 'account')
+        self.assertEqual(record['tree_checkpoint_checks'][-1]['option_count'], 3)
+        self.assertFalse(record['tree_checkpoint_checks'][-1]['options'][-1]['painted'])
+        self.assertEqual(selected, [])
+        self.assertEqual(emails, 1)
+
+    def exercise_tree_safety_checks(self, extra_html='', after_initial='', on_select='', animated=False,
+                                    selector='label[for^="choice-"]', other_text='Another choice', setup_script=''):
+        context = self.browser.new_context()
+        state = {'accounts': {'one@gmail.com': {'step': ROUTE['shadow_checkpoint'], 'next_run': 123}},
+                 'global_pause': False}
+        try:
+            page = context.new_page()
+            page.set_default_timeout(1500)
+            page.set_content('''<style>@keyframes reveal {from {opacity:0} to {opacity:1}}
+                .revealing {animation:reveal .2s both}</style>
+                <script>window.selections=0;window.submissions=0;</script>
+                <form id="choices" onsubmit="event.preventDefault();window.submissions++;document.body.innerHTML='Next scene'">
+                <input hidden type="radio" name="choice" id="choice-0">
+                <label for="choice-0">Climb down slowly to pursue the sound</label>
+                <input hidden type="radio" name="choice" id="choice-1">
+                <label for="choice-1">OTHER_TEXT</label>EXTRA_HTML</form>
+                <button form="choices" data-choices-submit>Next Scene</button>'''
+                .replace('OTHER_TEXT', other_text).replace('EXTRA_HTML', extra_html))
+            page.locator('#choice-0').evaluate("""(input, onSelect) => input.addEventListener('change', () => {
+                window.selections++; if(onSelect) Function(onSelect)();
+            })""", on_select)
+            if animated:
+                page.locator('label[for="choice-1"]').evaluate("element => element.classList.add('revealing')")
+            if setup_script:
+                page.evaluate(setup_script)
+            with tempfile.TemporaryDirectory() as directory:
+                with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'CHOICES_SELECTOR': selector,
+                                            'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit]'}), \
+                     patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
+                     patch('builtins.print') as output:
+                    error = None
+                    try:
+                        _, expected = check_tree_checkpoint(page, state, 'one@gmail.com', 'initial')
+                        if after_initial:
+                            page.evaluate(after_initial)
+                        execute_choice(page, page.locator('label[for="choice-0"]'),
+                            before_action=lambda stage: check_tree_checkpoint(
+                                page, state, 'one@gmail.com', stage, expected=expected))
+                    except TreeCheckpointReview as failure:
+                        error = str(failure)
+                    saved = json.loads((Path(directory) / 'state.json').read_text())
+                    log = '\n'.join(str(call.args[0]) for call in output.call_args_list)
+                    return saved, error, page.evaluate('window.selections'), page.evaluate('window.submissions'), log
+        finally:
+            context.close()
+
+    def test_tree_two_options_are_logged_and_checked_three_times(self):
+        state, error, selections, submissions, log = self.exercise_tree_safety_checks()
+        self.assertIsNone(error)
+        self.assertEqual((selections, submissions), (1, 1))
+        checks = state['accounts']['one@gmail.com']['tree_checkpoint_checks']
+        self.assertEqual([check['stage'] for check in checks],
+                         ['initial', 'before selection', 'before submission'])
+        self.assertTrue(all(check['option_count'] == 2 and not check['shadow_found'] for check in checks))
+        self.assertIn('Climb down slowly to pursue the sound', log)
+        self.assertIn('Another choice', log)
+        self.assertEqual(state['accounts']['one@gmail.com']['next_run'], 123)
+
+    def test_tree_shadow_is_checked_even_with_only_two_options(self):
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(other_text='Follow a SHADOW')
+        self.assertIn('shadow', error)
+        self.assertEqual((selections, submissions), (0, 0))
+        self.assertEqual(state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]['option_count'], 2)
+
+    def test_tree_counts_extra_options_excluded_by_configured_selector(self):
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(
+            extra_html='<input hidden type="radio" name="choice" id="choice-2"><label hidden for="choice-2">A new route</label>',
+            selector='label[for="choice-0"], label[for="choice-1"]')
+        self.assertIn('3 options', error)
+        self.assertEqual((selections, submissions), (0, 0))
+        self.assertEqual(state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]['option_count'], 3)
+
+    def test_tree_second_check_catches_a_new_third_option_before_selection(self):
+        mutation = "document.querySelector('#choices').insertAdjacentHTML('beforeend', '<input type=radio name=choice id=choice-2><label for=choice-2>Follow the shadow</label>')"
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(after_initial=mutation)
+        self.assertIn('shadow', error)
+        self.assertEqual((selections, submissions), (0, 0))
+        check = state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]
+        self.assertEqual(check['stage'], 'before selection')
+        self.assertEqual(check['option_count'], 3)
+
+    def test_tree_checks_again_after_selection_before_next_scene(self):
+        mutation = "document.querySelector('#choices').insertAdjacentHTML('beforeend', '<input type=radio name=choice id=choice-2><label for=choice-2>Follow an unfamiliar shape</label>')"
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(on_select=mutation)
+        self.assertIn('3 options', error)
+        self.assertEqual((selections, submissions), (1, 0))
+        check = state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]
+        self.assertEqual(check['stage'], 'before submission')
+        self.assertEqual(check['option_count'], 3)
+
+    def test_tree_waits_for_finite_reveal_animations_before_choosing(self):
+        state, error, selections, submissions, log = self.exercise_tree_safety_checks(animated=True)
+        self.assertIsNone(error)
+        self.assertEqual((selections, submissions), (1, 1))
+        self.assertIn('initial after reveal', [check['stage'] for check in state['accounts']['one@gmail.com']['tree_checkpoint_checks']])
+        self.assertIn('waiting for all options', log)
+
+    def test_tree_detects_a_third_option_inserted_during_reveal_animation(self):
+        mutation = "setTimeout(() => document.querySelector('#choices').insertAdjacentHTML('beforeend', '<input hidden type=radio name=choice id=choice-2><label hidden for=choice-2>Follow the shadow</label>'), 100)"
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(
+            animated=True, setup_script=mutation)
+        self.assertIn('shadow', error)
+        self.assertEqual((selections, submissions), (0, 0))
+        self.assertEqual(state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]['option_count'], 3)
+
+    def test_tree_stops_on_changed_wording_between_checks(self):
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(
+            after_initial="document.querySelector('label[for=choice-1]').textContent='An unexpected replacement'")
+        self.assertIn('changed between safety checks', error)
+        self.assertEqual((selections, submissions), (0, 0))
+
+    def test_tree_unlabelled_radio_is_counted(self):
+        _, error, selections, submissions, _ = self.exercise_tree_safety_checks(
+            extra_html='<input hidden type="radio" name="choice" id="choice-2">')
+        self.assertIn('3 options', error)
+        self.assertEqual((selections, submissions), (0, 0))
 
     def test_recorded_ending_never_sets_cooldown_without_site_confirmation(self):
         state, _, _, _ = self.exercise_latest_recording(cooldown=False)
