@@ -49,10 +49,10 @@ def wait_code(client, after, account):
     raise RuntimeError('Timed out waiting for a matching forwarded verification email')
 
 
-def notify(subject, body):
+def notify(subject, body, recipient=None):
     message = EmailMessage()
     message['From'] = os.environ['MAIL_USER']
-    message['To'] = os.environ.get('NOTIFY_TO', 'rljr.code@gmail.com')
+    message['To'] = recipient or os.environ.get('NOTIFY_TO', 'rljr.code@gmail.com')
     message['Subject'] = subject
     message.set_content(body)
     with smtplib.SMTP(os.environ.get('SMTP_HOST', 'smtp.gmail.com'), 587, timeout=30) as server:
