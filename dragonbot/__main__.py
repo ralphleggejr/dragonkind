@@ -121,11 +121,11 @@ def story_controls(page):
 
 
 PAINTED_ELEMENT_JS = """(element) => {
-    if (!element?.isConnected || !element.getClientRects().length) return false;
+    if (!element?.isConnected || ![...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) return false;
     for (let node = element; node; node = node.parentElement) {
         const style = getComputedStyle(node);
         if (style.visibility !== 'visible' || style.display === 'none' ||
-            Number(style.opacity) <= 0 || node.hidden || node.inert) return false;
+            style.contentVisibility === 'hidden' || Number(style.opacity) <= 0 || node.hidden || node.inert) return false;
     }
     return true;
 }"""
@@ -158,23 +158,7 @@ def read_story_controls(page, wait_all_choices=True):
     if labels and wait_all_choices:
         # Each choice can reveal separately. Include every current option in shadow checks.
         label = story_controls(page).nth(labels[0]['index'])
-        group = label.evaluate_handle("(element) => element.control?.form || element.closest('form') || element.parentElement")
-        try:
-            pending = group.evaluate("""(group) => {
-                const painted = """ + PAINTED_ELEMENT_JS + """;
-                return [...group.querySelectorAll('label[for^="choice-"]')].filter(element => !painted(element)).length;
-            }""")
-            if pending:
-                print(f'Waiting for {pending} more story option(s) to reveal; maximum wait {page_timeout_ms() // 1000}s.', flush=True)
-            page.wait_for_function("""(group) => {
-                const painted = """ + PAINTED_ELEMENT_JS + """;
-                // Animation-delayed options start with visibility:hidden. They still
-                // belong to this choice group and must participate in the wait.
-                const labels = [...group.querySelectorAll('label[for^="choice-"]')];
-                return labels.length > 0 && labels.every(painted);
-            }""", arg=group)
-        finally:
-            group.dispose()
+        wait_choice_options(page, label)
         rows = [row for row in story_control_snapshot(page) if row['painted']]
     return rows
 
@@ -183,7 +167,7 @@ class TreeCheckpointReview(StoryPositionError):
     """Stop this account before advancing past an unusual post-tree choice."""
 
 
-TREE_OPTIONS_JS = """(group) => {
+CHOICE_OPTIONS_JS = """(group) => {
     const painted = """ + PAINTED_ELEMENT_JS + """;
     const inputs = [...group.querySelectorAll('input[type="radio"]')];
     // Inspect the whole active group, independent of CHOICES_SELECTOR or visibility.
@@ -200,12 +184,41 @@ TREE_OPTIONS_JS = """(group) => {
                 painted: false, enabled: false});
         }
     }
-    const animating = group.getAnimations({subtree: true}).some(animation =>
+    const animations = new Set(group.getAnimations({subtree: true}));
+    // A form can be fully laid out while its surrounding panel is still revealing.
+    // Associated labels can also be outside the form; include their animations.
+    for (const element of [group, ...labels]) {
+        for (let node = element; node; node = node.parentElement) {
+            for (const animation of node.getAnimations()) animations.add(animation);
+        }
+    }
+    const animating = [...animations].some(animation =>
         Number.isFinite(animation.effect?.getComputedTiming().endTime) &&
-        (animation.pending || animation.playState === 'running'));
-    return {options, settled: group.isConnected && options.length > 0 &&
-        options.every(option => option.painted) && !animating};
+        (animation.pending || !['finished', 'idle'].includes(animation.playState)));
+    const visibleCount = options.filter(option => option.painted).length;
+    const allVisible = options.length > 0 && visibleCount === options.length;
+    return {options, visible_count: visibleCount, all_visible: allVisible,
+        animations_complete: !animating, settled: group.isConnected && allVisible && !animating};
 }"""
+
+
+def wait_choice_options(page, label):
+    group = label.evaluate_handle(
+        "(element) => element.control?.form || element.closest('form') || element.parentElement")
+    try:
+        snapshot = group.evaluate(CHOICE_OPTIONS_JS)
+        if not snapshot['settled']:
+            pending = len(snapshot['options']) - snapshot['visible_count']
+            print(f'Waiting for all story options to be visible and reveal animations to finish '
+                  f'({pending} hidden); maximum wait {page_timeout_ms() // 1000}s.', flush=True)
+        page.wait_for_function("""(group) => {
+            const inspect = """ + CHOICE_OPTIONS_JS + """;
+            return !group.isConnected || inspect(group).settled;
+        }""", arg=group)
+        if not group.evaluate(CHOICE_OPTIONS_JS)['settled']:
+            raise StoryPositionError('The active choice group changed before all options were visible')
+    finally:
+        group.dispose()
 
 
 def tree_choice_group(page, rows):
@@ -228,6 +241,8 @@ def check_tree_checkpoint(page, state, account, stage, expected=None):
         labels = [option['text'] for option in options]
         entry = {'checked_at': datetime.now().astimezone().isoformat(), 'stage': check_stage,
                  'option_count': len(options), 'shadow_found': shadow(labels),
+                 'visible_count': snapshot['visible_count'], 'all_visible': snapshot['all_visible'],
+                 'animations_complete': snapshot['animations_complete'],
                  'settled': snapshot['settled'], 'options': options}
         record.setdefault('tree_checkpoint_checks', []).append(entry)
         save_state(STATE, state)
@@ -249,20 +264,22 @@ def check_tree_checkpoint(page, state, account, stage, expected=None):
             snapshot = {'options': [{'text': row['text'], 'control': None,
                                     'painted': True, 'enabled': True}
                                    for row in rows if row['tag'] == 'BUTTON'], 'settled': True}
+            snapshot.update(visible_count=len(snapshot['options']),
+                            all_visible=bool(snapshot['options']), animations_complete=True)
         else:
-            snapshot = group.evaluate(TREE_OPTIONS_JS)
+            snapshot = group.evaluate(CHOICE_OPTIONS_JS)
         fingerprint = inspect(snapshot, stage)
         if group is not None and not snapshot['settled']:
             print('Tree checkpoint: waiting for all options and their reveal animations to finish.', flush=True)
             page.wait_for_function("""(group) => {
-                const inspect = """ + TREE_OPTIONS_JS + """;
+                const inspect = """ + CHOICE_OPTIONS_JS + """;
                 const snapshot = inspect(group);
                 // Wake immediately if a new/hidden third option or shadow appears.
                 return !group.isConnected || snapshot.options.length !== 2 ||
                     snapshot.options.some(option => option.text.toLowerCase().includes('shadow')) ||
                     snapshot.settled;
             }""", arg=group)
-            snapshot = group.evaluate(TREE_OPTIONS_JS)
+            snapshot = group.evaluate(CHOICE_OPTIONS_JS)
             fingerprint = inspect(snapshot, stage + ' after reveal')
         if not snapshot['settled']:
             raise TreeCheckpointReview('Tree checkpoint options did not finish revealing')
@@ -278,8 +295,13 @@ def tree_report_details(account, checks, outcome):
              'Continuing requires exactly 2 labelled, enabled options and an unchanged option list.',
              f'Safety checks recorded: {len(checks)}']
     for index, check in enumerate(checks, 1):
+        visible_count = check.get('visible_count', sum(option['painted'] for option in check['options']))
+        all_visible = check.get('all_visible', bool(check['options']) and visible_count == check['option_count'])
         lines.extend(['', f'Check {index}: {check["stage"]}', f'Time: {check["checked_at"]}',
                       f'Options found: {check["option_count"]}',
+                      f'Visible options: {visible_count} of {check["option_count"]}',
+                      'All options visible: ' + ('YES' if all_visible else 'NO'),
+                      'Animations complete: ' + ('YES' if check.get('animations_complete', check['settled']) else 'NO'),
                       'Shadow found: ' + ('YES' if check['shadow_found'] else 'NO'),
                       'Reveal complete: ' + ('YES' if check['settled'] else 'NO')])
         for number, option in enumerate(check['options'], 1):
@@ -451,6 +473,8 @@ def execute_choice(page, selection, before_action=None):
     # Playwright still waits for the label to be visible, stable, and clickable.
     if before_action is not None:
         before_action('before selection')
+    else:
+        wait_choice_options(page, selection)
     selection.click()
     page.wait_for_function('(id) => document.getElementById(id)?.checked === true', arg=control_id)
     # Selection alone does not advance the story; submit only after it is checked.
@@ -459,7 +483,8 @@ def execute_choice(page, selection, before_action=None):
     if submit.count() != 1:
         raise RuntimeError('Expected one visible choice submit button')
     click_transition(page, submit, before_click=(
-        lambda: before_action('before submission')) if before_action is not None else None)
+        lambda: before_action('before submission')) if before_action is not None
+        else lambda: wait_choice_options(page, selection))
 
 
 def report_login_progress(stage, progress=None):
@@ -632,7 +657,7 @@ def inspect_resumed_story(page, route, state, account):
             # run, before waiting on a potentially hidden extra option.
             group = tree_choice_group(page, rows)
             try:
-                all_labels = [option['text'] for option in group.evaluate(TREE_OPTIONS_JS)['options']]
+                all_labels = [option['text'] for option in group.evaluate(CHOICE_OPTIONS_JS)['options']]
             finally:
                 group.dispose()
             if matching_choices(all_labels, route['steps'][route['shadow_checkpoint']]):

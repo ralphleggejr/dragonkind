@@ -439,6 +439,9 @@ class BrowserFlow(unittest.TestCase):
         for stage in ('initial', 'before selection', 'before submission'):
             self.assertIn(stage, notifications[0])
         self.assertIn('Options found: 2', notifications[0])
+        self.assertEqual(notifications[0].count('Visible options: 2 of 2'), 3)
+        self.assertEqual(notifications[0].count('All options visible: YES'), 3)
+        self.assertEqual(notifications[0].count('Animations complete: YES'), 3)
         self.assertIn('Shadow found: NO', notifications[0])
         self.assertIn('Climb down slowly to pursue the sound', notifications[0])
         self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['last_tree_report']['status'], 'sent')
@@ -491,8 +494,10 @@ class BrowserFlow(unittest.TestCase):
             self.assertIn(option['text'], notifications[0])
 
     def test_resumed_tree_counts_a_never_visible_third_option(self):
+        notifications = []
         state, _, selected, emails = self.exercise_latest_recording(
-            resumed=True, resume_scene=16, extra_option='Follow the mysterious shape', hidden_extra=True)
+            resumed=True, resume_scene=16, extra_option='Follow the mysterious shape', hidden_extra=True,
+            notification_bodies=notifications)
         record = state['accounts'][ROUTE['accounts'][0]]
         self.assertEqual(record['status'], 'paused')
         self.assertEqual(record['pause_scope'], 'account')
@@ -500,9 +505,12 @@ class BrowserFlow(unittest.TestCase):
         self.assertFalse(record['tree_checkpoint_checks'][-1]['options'][-1]['painted'])
         self.assertEqual(selected, [])
         self.assertEqual(emails, 1)
+        self.assertIn('Visible options: 2 of 3', notifications[0])
+        self.assertIn('All options visible: NO', notifications[0])
 
     def exercise_tree_safety_checks(self, extra_html='', after_initial='', on_select='', animated=False,
-                                    selector='label[for^="choice-"]', other_text='Another choice', setup_script=''):
+                                    selector='label[for^="choice-"]', other_text='Another choice', setup_script='',
+                                    ancestor_animated=False):
         context = self.browser.new_context()
         state = {'accounts': {'one@gmail.com': {'step': ROUTE['shadow_checkpoint'], 'next_run': 123}},
                  'global_pause': False}
@@ -512,11 +520,11 @@ class BrowserFlow(unittest.TestCase):
             page.set_content('''<style>@keyframes reveal {from {opacity:0} to {opacity:1}}
                 .revealing {animation:reveal .2s both}</style>
                 <script>window.selections=0;window.submissions=0;</script>
-                <form id="choices" onsubmit="event.preventDefault();window.submissions++;document.body.innerHTML='Next scene'">
+                <section id="choice-panel"><form id="choices" onsubmit="event.preventDefault();window.submissions++;document.body.innerHTML='Next scene'">
                 <input hidden type="radio" name="choice" id="choice-0">
                 <label for="choice-0">Climb down slowly to pursue the sound</label>
                 <input hidden type="radio" name="choice" id="choice-1">
-                <label for="choice-1">OTHER_TEXT</label>EXTRA_HTML</form>
+                <label for="choice-1">OTHER_TEXT</label>EXTRA_HTML</form></section>
                 <button form="choices" data-choices-submit>Next Scene</button>'''
                 .replace('OTHER_TEXT', other_text).replace('EXTRA_HTML', extra_html))
             page.locator('#choice-0').evaluate("""(input, onSelect) => input.addEventListener('change', () => {
@@ -524,6 +532,9 @@ class BrowserFlow(unittest.TestCase):
             })""", on_select)
             if animated:
                 page.locator('label[for="choice-1"]').evaluate("element => element.classList.add('revealing')")
+            if ancestor_animated:
+                page.locator('#choice-panel').evaluate(
+                    "element => { element.animate([{opacity:.2}, {opacity:1}], {duration:300, fill:'both'}); }")
             if setup_script:
                 page.evaluate(setup_script)
             with tempfile.TemporaryDirectory() as directory:
@@ -605,6 +616,17 @@ class BrowserFlow(unittest.TestCase):
         self.assertIn('shadow', error)
         self.assertEqual((selections, submissions), (0, 0))
         self.assertEqual(state['accounts']['one@gmail.com']['tree_checkpoint_checks'][-1]['option_count'], 3)
+
+    def test_tree_waits_for_surrounding_panel_and_catches_late_shadow(self):
+        mutation = "setTimeout(() => document.querySelector('#choices').insertAdjacentHTML('beforeend', '<input hidden type=radio name=choice id=choice-2><label hidden for=choice-2>Follow the shadow</label>'), 100)"
+        state, error, selections, submissions, _ = self.exercise_tree_safety_checks(
+            ancestor_animated=True, setup_script=mutation)
+        self.assertIn('shadow', error)
+        self.assertEqual((selections, submissions), (0, 0))
+        checks = state['accounts']['one@gmail.com']['tree_checkpoint_checks']
+        self.assertFalse(checks[0]['animations_complete'])
+        self.assertEqual(checks[-1]['option_count'], 3)
+        self.assertFalse(checks[-1]['all_visible'])
 
     def test_tree_stops_on_changed_wording_between_checks(self):
         state, error, selections, submissions, _ = self.exercise_tree_safety_checks(
