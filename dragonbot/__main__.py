@@ -9,8 +9,9 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from .core import choose, load_state, save_state, shadow, login_request_summary, refresh_global_pause, retry_login_rejections, normalized, locate_story_step, resume_story_failures, StoryPositionError, matching_choices
 from .mail import highwater, inbox, notify, wait_code
-from .runtime import AlreadyRunningError, next_attempt, state_lock
+from .runtime import AlreadyRunningError, account_deadline, next_attempt, state_lock
 from .rotation import begin_rotation, record_result, recover_finished_result, rotation_ready, rotation_summary
+from .retries import clear_retry_after_success, protected_pause, retryable_failure, schedule_retry
 
 STATE = Path('data/state.json')
 TREE_REPORT_TO = 'rljr.code@gmail.com'
@@ -359,9 +360,9 @@ def retry_pending_notifications(state, accounts):
     for account in accounts:
         record = state['accounts'].get(account, {})
         if record.get('notification_pending') and record.get('notification_retry_at', 0) <= time.time():
-            if record.get('notification_urgent') or 'shadow' in record.get('reason', '').casefold():
-                alert(state, account, record.get('reason', 'Paused'),
-                      global_pause=record.get('pause_scope', 'global') == 'global', immediate=True)
+            if (record.get('notification_body') or record.get('notification_urgent')
+                    or 'shadow' in record.get('reason', '').casefold()):
+                deliver_account_notification(state, account)
             else:
                 record.update(notification_pending=False, notification_deferred=True)
                 save_state(STATE, state)
@@ -750,10 +751,70 @@ def logout_after_death(page):
     logout_from_profile(page)
 
 
+def deliver_account_notification(state, account):
+    record = state['accounts'][account]
+    body = record.get('notification_body') or (
+        f'Account: {account}\nReason: {record.get("reason", "Paused")}\n'
+        + record.get('notification_details', ''))
+    subject = record.get('notification_subject', 'Dragonkind automation paused')
+    record['notification_body'] = body
+    record['notification_subject'] = subject
+    try:
+        notify(subject, body, recipient=record.get('notification_recipient') or TREE_REPORT_TO)
+        record['notification_pending'] = False
+        record.pop('notification_retry_at', None)
+    except Exception:
+        record['notification_pending'] = True
+        record['notification_retry_at'] = time.time() + MAIL_RETRY_SECONDS
+        print('Notification could not be delivered; email will retry automatically.', flush=True)
+    save_state(STATE, state)
+
+
+def queue_account_notification(state, account, subject, body):
+    record = state['accounts'][account]
+    record.update(notification_subject=subject, notification_body=body,
+                  notification_recipient=TREE_REPORT_TO, notification_pending=True,
+                  notification_urgent=True)
+    save_state(STATE, state)
+    deliver_account_notification(state, account)
+
+
+def save_failure_screenshot(page, account):
+    if page is not None:
+        try:
+            page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
+        except Exception:
+            pass
+
+
+def handle_account_failure(state, account, reason, page=None, details=None, configured_accounts=None):
+    record = state['accounts'].setdefault(account, {})
+    if protected_pause(record):
+        alert(state, account, record.get('reason') or 'Tree checkpoint requires review', page,
+              global_pause=False, details=details or tree_report_details(
+                  account, record.get('tree_checkpoint_checks', []), 'PROTECTED PAUSE'))
+        return
+    schedule_retry(record, reason, time.time())
+    refresh_global_pause(state, configured_accounts if configured_accounts is not None else list(state['accounts']))
+    save_failure_screenshot(page, account)
+    retry_time = datetime.fromtimestamp(record['retry_at']).astimezone().isoformat()
+    body = (f'Account: {account}\nError: {reason}\n'
+            f'Automatic retry: {retry_time}\nFailure count: {record["retry_attempts"]}\n'
+            'The browser is closed between attempts. Other eligible accounts continue.\n'
+            'Saved site cooldowns are preserved; shadow and unusual-option pauses are protected.'
+            + ('\n\n' + details if details else ''))
+    print(f'Automatic retry scheduled for {account} at {retry_time}.', flush=True)
+    if record.get('last_error_notified_reason') != reason:
+        record['last_error_notified_reason'] = reason
+        queue_account_notification(state, account, f'Dragonkind error; retry scheduled - {account}', body)
+    else:
+        save_state(STATE, state)
+
+
 def alert(state, account, reason, page=None, global_pause=True, details=None, recipient=None, immediate=None):
     record = state['accounts'].setdefault(account, {})
     if immediate is None:
-        immediate = 'shadow' in reason.casefold()
+        immediate = True
     if details is not None:
         record['notification_details'] = details
     elif record.get('reason') != reason:
@@ -768,28 +829,15 @@ def alert(state, account, reason, page=None, global_pause=True, details=None, re
     state['global_pause'] = state['global_pause'] or global_pause
     save_state(STATE, state)  # Persist the pause even if screenshot or mail fails.
     print(f'Paused {account}: {reason}. Scope: {record["pause_scope"]}.', flush=True)
-    if page is not None:
-        try:
-            page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
-        except Exception:
-            pass
+    save_failure_screenshot(page, account)
     if not immediate:
         print('Pause details will be included in the end-of-rotation summary.', flush=True)
         return
-    try:
-        notify('Dragonkind automation paused',
-               f'Account: {account}\nReason: {reason}\nStep: {record.get("step", 0)}\n'
-               'No further choices will be made for this paused scope.'
-               + ('\n\n' + record['notification_details'] if record.get('notification_details')
-                  else '\nReview the local screenshot and state.'),
-               recipient=record.get('notification_recipient') or TREE_REPORT_TO)
-        record['notification_pending'] = False
-        record.pop('notification_retry_at', None)
-        save_state(STATE, state)
-    except Exception:
-        record['notification_retry_at'] = time.time() + MAIL_RETRY_SECONDS
-        save_state(STATE, state)
-        print('Notification could not be delivered. Pause saved; email will retry automatically.', flush=True)
+    body = (f'Account: {account}\nReason: {reason}\nStep: {record.get("step", 0)}\n'
+            'No further choices will be made for this paused scope.'
+            + ('\n\n' + record['notification_details'] if record.get('notification_details')
+               else '\nReview the emailed reason and saved site state.'))
+    queue_account_notification(state, account, 'Dragonkind automation paused', body)
 
 
 def play(browser, route, state, account, restart_browser=None):
@@ -904,7 +952,7 @@ def play(browser, route, state, account, restart_browser=None):
         alert(state, account, str(error), page,
               global_pause=os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global',
               details=details, recipient=TREE_REPORT_TO,
-              immediate=any(check['shadow_found'] for check in checks))
+              immediate=True)
     except Exception as error:
         if not story_started:
             record['login_diagnostic'] = login_page_status(page)
@@ -916,10 +964,10 @@ def play(browser, route, state, account, restart_browser=None):
         detail = f'{type(error).__name__}; {error}' if isinstance(error, (LoginRequestRejected, StoryPositionError)) else type(error).__name__
         reason = f'Failure while {phase} ({detail})'
         checks = record.get('tree_checkpoint_checks', []) if record.get('step') == route['shadow_checkpoint'] else []
-        alert(state, account, reason,
+        handle_account_failure(state, account, reason,
               page if authenticated or isinstance(error, LoginRequestRejected) else None,
-              details=tree_report_details(account, checks, f'PAUSED: {reason}') if checks else None,
-              recipient=TREE_REPORT_TO if checks else None)
+              details=tree_report_details(account, checks, f'RETRY SCHEDULED: {reason}') if checks else None,
+              configured_accounts=route['accounts'])
     finally:
         context.close()
 
@@ -936,6 +984,10 @@ def run_account(playwright, route, state, account, headless=True):
         return browser
     try:
         play(launch_fresh_browser(), route, state, account, restart_browser=launch_fresh_browser)
+        record = state.get('accounts', {}).get(account, {})
+        if record.get('status') == 'cooldown':
+            clear_retry_after_success(record)
+            save_state(STATE, state)
     finally:
         if browser is not None:
             browser.close()
@@ -960,15 +1012,18 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
     if resume_stories:
         resumed = resume_story_failures(state, active_accounts)
         print('Rechecking saved story failures against the visible site: ' + (', '.join(resumed) or 'none'), flush=True)
+    for account in active_accounts:
+        record = state['accounts'].get(account, {})
+        if record.get('status') in ('active', 'logging_out'):
+            handle_account_failure(state, account, 'Interrupted run; retry after checking the site',
+                                   configured_accounts=active_accounts)
+        elif record.get('status') == 'paused' and retryable_failure(record):
+            handle_account_failure(state, account, record['reason'], configured_accounts=active_accounts)
+    refresh_global_pause(state, active_accounts)
     recover_finished_result(state, active_accounts)
     save_state(STATE, state)
     print('Configured accounts: ' + ', '.join(active_accounts), flush=True)
     print('Browser mode: ' + ('headless (no visible windows).' if headless else 'visible Chromium.'), flush=True)
-    for account, record in state['accounts'].items():
-        if account not in active_accounts:
-            continue
-        if record.get('status') in ('active', 'logging_out'):
-            alert(state, account, 'Interrupted run; manual review required')
     last_schedule = None
     while True:
         retry_pending_notifications(state, active_accounts)
@@ -990,18 +1045,23 @@ def run_scheduler(headless=True, retry_rejected=False, resume_stories=False):
             time.sleep(60)
             continue
         runnable = any(state['accounts'].get(account, {}).get('status') != 'paused'
-                       and state['accounts'].get(account, {}).get('next_run', 0) <= time.time()
+                       and account_deadline(state['accounts'].get(account, {})) <= time.time()
                        for account in active_accounts)
         if runnable:
             # No browser or Playwright driver is kept alive during the cooldown wait.
             with sync_playwright() as playwright:
                 for account in active_accounts:
                     record = state['accounts'].get(account, {})
-                    if record.get('status') == 'paused' or record.get('next_run', 0) > time.time():
+                    if record.get('status') == 'paused' or account_deadline(record) > time.time():
                         continue
                     begin_rotation(state, active_accounts)['in_progress'] = account
                     save_state(STATE, state)
-                    run_account(playwright, route, state, account, headless=headless)
+                    try:
+                        run_account(playwright, route, state, account, headless=headless)
+                    except Exception as error:
+                        handle_account_failure(state, account,
+                            f'Failure while starting or closing the browser ({type(error).__name__})',
+                            configured_accounts=active_accounts)
                     record_result(state, active_accounts, account)
                     save_state(STATE, state)
                     if state['global_pause']:

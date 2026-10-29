@@ -40,8 +40,12 @@ def state_lock(state_path):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def account_deadline(record):
+    return max(record.get('next_run', 0), record.get('retry_at', 0))
+
+
 def next_attempt(state, accounts, now):
-    candidates = [(max(now, state['accounts'].get(account, {}).get('next_run', 0)), index, account)
+    candidates = [(max(now, account_deadline(state['accounts'].get(account, {}))), index, account)
                   for index, account in enumerate(accounts)
                   if state['accounts'].get(account, {}).get('status') != 'paused']
     if not candidates:

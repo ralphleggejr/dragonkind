@@ -73,10 +73,11 @@ class RotationEmails(unittest.TestCase):
             self.assertEqual(len(summaries), len(played) // 8)
             played.append((account, now[0]))
             if failure:
-                alert(saved, account, 'Login failure (TimeoutError)')
+                alert(saved, account, 'Manual global stop', immediate=False)
                 mail.assert_not_called()
             elif all_paused:
-                alert(saved, account, 'Tree checkpoint has 3 options; expected exactly 2', global_pause=False)
+                alert(saved, account, 'Tree checkpoint has 3 options; expected exactly 2',
+                      global_pause=False, immediate=False)
             elif shadow and account == ACCOUNTS[2]:
                 checks = saved['accounts'][account]['tree_checkpoint_checks']
                 checks[-1].update(shadow_found=True, option_count=3)
@@ -133,13 +134,13 @@ class RotationEmails(unittest.TestCase):
         self.assertEqual([account for account, _ in played], ACCOUNTS * 2)
         self.assertEqual([start for _, start in played[8:]], [start + 14400 for _, start in played[:8]])
 
-    def test_all_nonshadow_pauses_produce_one_summary_not_two(self):
+    def test_explicitly_deferred_pauses_produce_one_summary_not_two(self):
         saved, mail, played = self.simulate(staggered=True, all_paused=True)
         self.assertEqual(mail.call_count, 1)
         self.assertEqual(len(played), 8)
         self.assertTrue(all(record['status'] == 'paused' for record in saved['accounts'].values()))
 
-    def test_global_failure_ends_round_with_one_partial_summary(self):
+    def test_manual_global_stop_ends_round_with_one_partial_summary(self):
         saved, mail, played = self.simulate(failure=True)
         self.assertEqual(len(played), 1)
         self.assertEqual(mail.call_count, 1)
@@ -168,19 +169,19 @@ class RotationEmails(unittest.TestCase):
                 self.assertEqual(mail.call_count, 1)
                 self.assertEqual(mail.call_args.args[1].count('Options found: 2'), 24)
 
-    def test_nonshadow_pause_is_deferred_and_paused_account_is_in_summary(self):
+    def test_unusual_option_error_alert_is_immediate_and_in_summary(self):
         state = self.state()
         with tempfile.TemporaryDirectory() as directory:
             with patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), patch('dragonbot.__main__.notify') as mail:
                 alert(state, ACCOUNTS[0], 'Tree checkpoint has 3 options; expected exactly 2', global_pause=False)
-                mail.assert_not_called()
-                self.assertTrue(state['accounts'][ACCOUNTS[0]]['notification_deferred'])
+                mail.assert_called_once()
+                self.assertFalse(state['accounts'][ACCOUNTS[0]]['notification_deferred'])
                 begin_rotation(state, ACCOUNTS)
                 for account in ACCOUNTS[1:]:
                     record_result(state, ACCOUNTS, account)
                 finish_rotation_report(state)
                 deliver_tree_reports(state)
-                mail.assert_called_once()
+                self.assertEqual(mail.call_count, 2)
                 self.assertIn('has 3 options', mail.call_args.args[1])
                 self.assertFalse(state['global_pause'])
 

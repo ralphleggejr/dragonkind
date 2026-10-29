@@ -136,11 +136,11 @@ class BrowserFlow(unittest.TestCase):
         self.assertTrue(state['accounts'][ROUTE['accounts'][0]]['notification_pending'])
         self.assertFalse(state['global_pause'])
 
-    def test_unexpected_choice_pauses_everything(self):
+    def test_unexpected_page_schedules_retry_without_choosing_an_option(self):
         state, emails = self.exercise(mismatch=True)
-        self.assertTrue(state['global_pause'])
-        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
-        self.assertEqual(emails, 0)
+        self.assertFalse(state['global_pause'])
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'retry_wait')
+        self.assertEqual(emails, 1)
 
     def test_welcome_reveals_real_text_email_field(self):
         context = self.browser.new_context()
@@ -468,7 +468,7 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(requests.count('/rotunda'), 1)
         self.assertEqual(emails, 1)
 
-    def test_tree_third_option_without_shadow_pauses_and_defers_email(self):
+    def test_tree_third_option_without_shadow_pauses_and_sends_error_email(self):
         notifications = []
         state, requests, selected, emails = self.exercise_latest_recording(
             extra_option='Follow an unfamiliar movement', notification_bodies=notifications)
@@ -479,12 +479,12 @@ class BrowserFlow(unittest.TestCase):
         self.assertFalse(state['global_pause'])
         self.assertNotIn('Climb down slowly to pursue the sound', selected)
         self.assertEqual(requests.count('/rotunda'), 1)
-        self.assertEqual(emails, 0)
+        self.assertEqual(emails, 1)
         check = record['tree_checkpoint_checks'][-1]
         self.assertEqual(check['option_count'], 3)
         self.assertFalse(check['shadow_found'])
-        self.assertEqual(notifications, [])
-        self.assertTrue(record['notification_deferred'])
+        self.assertEqual(len(notifications), 1)
+        self.assertFalse(record['notification_deferred'])
         self.assertIn('Options found: 3', record['notification_details'])
         for option in check['options']:
             self.assertIn(option['text'], record['notification_details'])
@@ -500,8 +500,8 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(record['tree_checkpoint_checks'][-1]['option_count'], 3)
         self.assertFalse(record['tree_checkpoint_checks'][-1]['options'][-1]['painted'])
         self.assertEqual(selected, [])
-        self.assertEqual(emails, 0)
-        self.assertEqual(notifications, [])
+        self.assertEqual(emails, 1)
+        self.assertEqual(len(notifications), 1)
         self.assertIn('Visible options: 2 of 3', record['notification_details'])
         self.assertIn('All options visible: NO', record['notification_details'])
 
@@ -640,15 +640,15 @@ class BrowserFlow(unittest.TestCase):
     def test_recorded_ending_never_sets_cooldown_without_site_confirmation(self):
         state, _, _, _ = self.exercise_latest_recording(cooldown=False)
         record = state['accounts'][ROUTE['accounts'][0]]
-        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['status'], 'retry_wait')
         self.assertEqual(record.get('next_run', 0), 0)
-        self.assertTrue(state['global_pause'])
+        self.assertFalse(state['global_pause'])
 
     def test_recorded_ending_stops_after_three_continue_buttons(self):
         state, requests, _, _ = self.exercise_latest_recording(ending_pages=4)
-        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'paused')
+        self.assertEqual(state['accounts'][ROUTE['accounts'][0]]['status'], 'retry_wait')
         self.assertEqual(requests.count('/rotunda'), 1)
-        self.assertTrue(state['global_pause'])
+        self.assertFalse(state['global_pause'])
 
     def test_recorded_ending_accepts_changing_death_prose_and_requires_cooldown(self):
         state, _, _, _ = self.exercise_latest_recording(known_narrative=True)
@@ -718,7 +718,7 @@ class BrowserFlow(unittest.TestCase):
         state, _, selected, _ = self.exercise_latest_recording(resumed=True, staggered_valley=True,
                                                              never_reveal_valley=True)
         record = state['accounts'][ROUTE['accounts'][0]]
-        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['status'], 'retry_wait')
         self.assertIn('TimeoutError', record['reason'])
         self.assertEqual(selected, [])
         options = {row['text']: row for row in record['story_diagnostic']['controls']}
@@ -727,7 +727,7 @@ class BrowserFlow(unittest.TestCase):
     def test_unknown_resumed_choice_saves_actual_options_and_controlled_reason(self):
         state, _, selected, _ = self.exercise_latest_recording(resumed=True, resume_scene=4, unknown_resume=True)
         record = state['accounts'][ROUTE['accounts'][0]]
-        self.assertEqual(record['status'], 'paused')
+        self.assertEqual(record['status'], 'retry_wait')
         self.assertIn('Cannot uniquely identify the current story step', record['reason'])
         self.assertIn('Unrecorded detour', [row['text'] for row in record['story_diagnostic']['controls']])
         self.assertEqual(selected, [])
@@ -1095,7 +1095,7 @@ class BrowserFlow(unittest.TestCase):
         finally:
             context.close()
 
-    def exercise_login_timeout(self, verify_code):
+    def exercise_login_timeout(self, verify_code, mail_error=None):
         context = self.browser.new_context()
         def site(route):
             if route.request.method == 'POST':
@@ -1117,14 +1117,22 @@ class BrowserFlow(unittest.TestCase):
                  patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
                  patch('dragonbot.__main__.inbox'), \
                  patch('dragonbot.__main__.highwater', return_value=42), \
-                 patch('dragonbot.__main__.wait_code', return_value='ABC123'), \
+                 patch('dragonbot.__main__.wait_code', return_value='ABC123', side_effect=mail_error), \
                  patch('dragonbot.__main__.notify'), \
                  patch('playwright.sync_api.Page.screenshot'):
                 play(browser, ROUTE, state, account)
                 saved = json.loads((Path(directory) / 'state.json').read_text())
-        self.assertTrue(saved['global_pause'])
+        self.assertFalse(saved['global_pause'])
+        self.assertEqual(saved['accounts'][account]['status'], 'retry_wait')
         self.assertNotIn('ABC123', json.dumps(saved))
         return saved['accounts'][account]
+
+    def test_reported_imap_abort_schedules_a_fresh_login_retry(self):
+        from imaplib import IMAP4
+        record = self.exercise_login_timeout(verify_code=False, mail_error=IMAP4.abort('fixture disconnect'))
+        self.assertEqual(record['reason'], 'Failure while waiting for the verification email (abort)')
+        self.assertEqual(record['retry_attempts'], 1)
+        self.assertGreater(record['retry_at'], __import__('time').time() + 290)
 
     def test_verification_timeout_identifies_code_form_stage(self):
         record = self.exercise_login_timeout(verify_code=False)
