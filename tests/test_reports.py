@@ -119,6 +119,21 @@ class RotationEmails(unittest.TestCase):
         self.assertNotIn('reporting_rotation', saved)
         self.assertTrue(all(saved['accounts'][account]['next_run'] == start + 14400 for account, start in played))
 
+    def test_summary_includes_site_cooldown_evidence_without_inventing_a_death(self):
+        state = self.state()
+        state['accounts'][ACCOUNTS[0]]['cooldown_confirmation'] = {
+            'confirmed_at': '2026-11-17T10:00:00-07:00', 'source': 'site_countdown',
+            'observed_deadline': 20000, 'death_screen_seen': False}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
+                 patch('dragonbot.__main__.notify') as mail:
+                self.complete_round(state)
+                deliver_tree_reports(state)
+                body = mail.call_args.args[1]
+                self.assertIn('Site cooldown confirmed: YES', body)
+                self.assertIn('Confirmation source: site_countdown', body)
+                self.assertIn('Death screen observed: NO', body)
+
     def test_shadow_emails_immediately_then_one_summary_after_remaining_accounts(self):
         saved, mail, played = self.simulate(shadow=True)
         self.assertEqual([account for account, _ in played], ACCOUNTS)

@@ -8,7 +8,8 @@ def result_snapshot(state, account, attempted):
     record = state['accounts'].get(account, {})
     return {'finished_at': datetime.now().astimezone().isoformat(), 'attempted': attempted,
             **deepcopy({key: record[key] for key in ('status', 'reason', 'next_run',
-                'retry_at', 'retry_attempts', 'tree_checkpoint_checks', 'notification_details') if key in record})}
+                'retry_at', 'retry_attempts', 'tree_checkpoint_checks', 'notification_details',
+                'cooldown_confirmation') if key in record})}
 
 
 def begin_rotation(state, accounts):
@@ -82,6 +83,14 @@ def rotation_summary(state, format_checks, aborted=False):
             deadline = max(result.get('next_run', 0), result.get('retry_at', 0))
             lines.append('Next eligible: ' + (datetime.fromtimestamp(deadline).astimezone().isoformat()
                                              if deadline else 'no saved cooldown'))
+            evidence = result.get('cooldown_confirmation')
+            if evidence:
+                lines.extend(['Site cooldown confirmed: YES', f'Confirmed at: {evidence["confirmed_at"]}',
+                              f'Confirmation source: {evidence["source"]}',
+                              'Observed deadline: ' + datetime.fromtimestamp(evidence['observed_deadline']).astimezone().isoformat(),
+                              'Death screen observed: ' + ('YES' if evidence.get('death_screen_seen') else 'NO')])
+            else:
+                lines.append('Site cooldown confirmed: not recorded for this attempt')
             if result.get('status') == 'retry_wait':
                 lines.append(f'Automatic retry scheduled; consecutive failures: {result.get("retry_attempts", 0)}')
             checks = result.get('tree_checkpoint_checks', [])

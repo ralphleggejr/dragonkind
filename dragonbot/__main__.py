@@ -12,13 +12,14 @@ from .mail import highwater, inbox, notify, wait_code
 from .runtime import AlreadyRunningError, account_deadline, next_attempt, state_lock
 from .rotation import begin_rotation, record_result, recover_finished_result, rotation_ready, rotation_summary
 from .retries import clear_retry_after_success, protected_pause, retryable_failure, schedule_retry
+from .cooldowns import CooldownEvidenceError, cooldown_evidence
 
 STATE = Path('data/state.json')
 TREE_REPORT_TO = 'rljr.code@gmail.com'
 MAIL_RETRY_SECONDS = 300
 REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECTOR',
             'MFA_SELECTOR', 'AUTH_READY_SELECTOR', 'CHOICES_SELECTOR', 'CHOICE_SUBMIT_SELECTOR', 'DEATH_SELECTOR',
-            'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER']
+            'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER', 'COOLDOWN_SELECTOR']
 
 
 def page_timeout_ms():
@@ -605,22 +606,40 @@ def finish_known_death_pages(page):
     raise RuntimeError('Known death narrative did not reach a result screen')
 
 
-def site_cooldown_deadline(page, fallback_seconds):
-    label = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label').filter(visible=True).first
-    timestamp = label.evaluate("""(element) => {
+def observe_site_cooldown(page, fallback_seconds):
+    labels = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label').filter(visible=True)
+    labels.first.wait_for(state='visible')
+    if labels.count() != 1:
+        raise CooldownEvidenceError('Expected exactly one visible cooldown label')
+    label = labels.first
+    wait_rendered(page, label)
+    observation = label.evaluate("""(element) => {
         const container = element.closest('.cooldown') || element.closest('section') || element.parentElement;
-        return container.querySelector('[data-countdown][datetime]')?.getAttribute('datetime') || null;
+        const timers = [...(container.matches('[data-countdown]') ? [container] : []),
+                        ...container.querySelectorAll('[data-countdown]')];
+        return {label: element.textContent.trim(), countdown_datetimes: timers.map(timer => timer.getAttribute('datetime')),
+                countdown_text: timers.map(timer => timer.textContent.trim()).join(' / ')};
     }""")
-    now = time.time()
-    if timestamp:
-        try:
-            deadline = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            if deadline.tzinfo is not None:
-                return max(now + 60, deadline.timestamp())
-        except ValueError:
-            pass
-    # Preserve the four-hour rule when the site exposes no readable deadline.
-    return now + fallback_seconds
+    if not observation['label']:
+        raise CooldownEvidenceError('The cooldown label is empty')
+    return cooldown_evidence(observation, time.time(), fallback_seconds)
+
+
+def site_cooldown_deadline(page, fallback_seconds):
+    return observe_site_cooldown(page, fallback_seconds)['observed_deadline']
+
+
+def confirm_account_cooldown(page, route, state, account, context):
+    evidence = observe_site_cooldown(page, route['cooldown_seconds'])
+    record = state['accounts'][account]
+    deadline = max(record.get('next_run', 0), evidence['observed_deadline'])
+    evidence.update(context=context, scheduled_next_run=deadline,
+                    death_screen_seen=context != 'already_cooling_on_login' and bool(record.get('death_screen_seen')))
+    record.update(status='logging_out', next_run=deadline, cooldown_confirmation=evidence)
+    save_state(STATE, state)
+    print(f'Site cooldown confirmed for {account}: {datetime.fromtimestamp(deadline).astimezone().isoformat()} '
+          f'({evidence["source"]}).', flush=True)
+    return deadline
 
 
 def logout_from_profile(page):
@@ -647,15 +666,16 @@ def account_ready_for_story(page, route, state, account, login_status):
     if login_status == 'authenticated':
         print('Login confirmed; waiting for Brave Threshing, Continue your story, or the cooldown panel.', flush=True)
         ready.or_(cooldown).filter(visible=True).first.wait_for(state='visible')
+    if not cooldown.is_visible():
+        wait_rendered(page, ready)
     if cooldown.is_visible():
         record = state['accounts'][account]
-        record.update(status='cooldown', next_run=max(record.get('next_run', 0),
-                      site_cooldown_deadline(page, route['cooldown_seconds'])), step=0)
-        save_state(STATE, state)
+        confirm_account_cooldown(page, route, state, account, 'already_cooling_on_login')
         logout_from_profile(page)
+        record.update(status='cooldown', step=0)
+        save_state(STATE, state)
         print(f'{account} is already cooling down; moving to the next account.', flush=True)
         return False
-    ready.wait_for(state='visible')
     return True
 
 
@@ -707,6 +727,9 @@ def finish_recorded_ending(page, route, state, account, allow_partial=False):
     for count in range(4):
         result = page.get_by_role('link', name='Continue', exact=True).filter(visible=True)
         rows = read_story_controls(page)
+        if visible(page, 'DEATH_SELECTOR').count():
+            wait_rendered(page, visible(page, 'DEATH_SELECTOR').first)
+            record['death_screen_seen'] = True
         onward_rows = [row for row in rows if row['tag'] == 'BUTTON' and normalized(row['text']) == 'continue']
         if any(row['tag'] == 'LABEL' for row in rows):
             raise StoryPositionError('Unexpected choice during the recorded ending')
@@ -720,15 +743,11 @@ def finish_recorded_ending(page, route, state, account, allow_partial=False):
                 raise StoryPositionError('Recorded result link must lead to Rotunda')
             wait_rendered(page, result)
             click_transition(page, result)
-            cooldown = page.locator(os.environ.get('COOLDOWN_SELECTOR') or '#cooldown-label')
-            wait_rendered(page, cooldown)
-            record.update(status='logging_out', next_run=max(record.get('next_run', 0),
-                          time.time() + route['cooldown_seconds']))
-            save_state(STATE, state)
+            confirm_account_cooldown(page, route, state, account, 'after_recorded_ending')
             logout_from_profile(page)
             record.update(status='cooldown', step=0)
             save_state(STATE, state)
-            print(f'Recorded ending and site cooldown confirmed for {account}; cooldown is four hours.', flush=True)
+            print(f'Recorded ending, site cooldown, and sign-out confirmed for {account}.', flush=True)
             return
         if count == 3 or len(onward_rows) != 1:
             raise StoryPositionError('Recorded ending exceeded its allowed Continue pages')
@@ -739,7 +758,7 @@ def finish_recorded_ending(page, route, state, account, allow_partial=False):
         click_transition(page, onward)
 
 
-def logout_after_death(page):
+def logout_after_death(page, on_cooldown=None):
     # This function must never use the ordinary Continue button as proof of death.
     if not visible(page, 'DEATH_SELECTOR').count():
         raise RuntimeError('Logout sequence requires a confirmed death screen')
@@ -747,7 +766,9 @@ def logout_after_death(page):
         if os.environ.get(name):
             click_transition(page, visible(page, name))
     if os.environ.get('COOLDOWN_SELECTOR'):
-        page.locator(os.environ['COOLDOWN_SELECTOR']).wait_for(state='visible')
+        wait_rendered(page, page.locator(os.environ['COOLDOWN_SELECTOR']).filter(visible=True).first)
+    if on_cooldown is not None:
+        on_cooldown()
     logout_from_profile(page)
 
 
@@ -891,6 +912,10 @@ def play(browser, route, state, account, restart_browser=None):
         phase = 'checking the story start or cooldown panel'
         if not account_ready_for_story(page, route, state, account, login_status):
             return
+        previous_cooldown = record.pop('cooldown_confirmation', None)
+        if previous_cooldown:
+            record['last_cooldown_confirmation'] = previous_cooldown
+        record['death_screen_seen'] = False
         story_started = True
         phase = 'following the story route'
         index = 0
@@ -938,14 +963,14 @@ def play(browser, route, state, account, restart_browser=None):
                 return
             if not finish_known_death_pages(page):
                 raise RuntimeError('Route ended without a confirmed death screen')
-        # Start cooldown on confirmation, even if logout subsequently fails.
-        record.update(next_run=time.time() + route['cooldown_seconds'], status='logging_out')
-        save_state(STATE, state)
-        phase = 'signing out after death'
-        logout_after_death(page)
+        wait_rendered(page, visible(page, 'DEATH_SELECTOR').first)
+        record['death_screen_seen'] = True
+        phase = 'confirming site cooldown after death'
+        logout_after_death(page, on_cooldown=lambda: confirm_account_cooldown(
+            page, route, state, account, 'after_confirmed_death'))
         record.update(status='cooldown', step=0)
         save_state(STATE, state)
-        print(f'Confirmed death and logout for {account}; cooldown is four hours.', flush=True)
+        print(f'Confirmed death, site cooldown, and logout for {account}.', flush=True)
     except TreeCheckpointReview as error:
         checks = record.get('tree_checkpoint_checks', [])
         details = tree_report_details(account, checks, f'PAUSED: {error}')

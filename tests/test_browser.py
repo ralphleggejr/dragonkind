@@ -50,7 +50,7 @@ class BrowserFlow(unittest.TestCase):
           document.body.innerHTML = n === -2 ? '<input type="email"><button id="email" onclick="next()">Request</button>'
             : n === -1 ? '<input id="mfa"><button id="submit" onclick="next()">Verify</button>'
             : (logoutFlow || resultFlow) && n >= rows.length ? deathFlow()
-            : n >= rows.length ? '<h1 id="death">Dead</h1><button id="logout" onclick="n=-3;next()">Sign out</button>'
+            : n >= rows.length ? '<h1 id="death">Dead</h1><p id="cooldown-label">You can brave Threshing again in</p><button id="logout" onclick="n=-3;next()">Sign out</button>'
             : '<h1>Scene '+n+'</h1>'+(forms && n > 1 && rows[n][0].toLowerCase() !== 'continue'
               ? `<form id="choices" onsubmit="event.preventDefault();if(this.querySelector(':checked'))next()">`+
                 rows[n].map((t,i)=>`<input hidden type="radio" name="choice" id="choice-${i}"><label class="choice" for="choice-${i}">${t}</label>`).join('')+
@@ -71,7 +71,7 @@ class BrowserFlow(unittest.TestCase):
           }
           if(n === rows.length) return '<h1 id="death">Dead</h1><button class="onward" data-page-next data-step="3" onclick="next()">Continue</button>';
           if(n === rows.length+1) return '<a class="icon-button" href="/rotunda" onclick="event.preventDefault();next()"><span>Rotunda</span></a>';
-          return `<button class="icon-button" popovertarget="profile" type="button"><span>Profile</span></button><div id="profile" popover><button class="text-link" type="submit" onclick="n=-3;next()">Sign out</button></div>`;
+          return `<p id="cooldown-label">You can brave Threshing again in</p><button class="icon-button" popovertarget="profile" type="button"><span>Profile</span></button><div id="profile" popover><button class="text-link" type="submit" onclick="n=-3;next()">Sign out</button></div>`;
         }
         function next() { n++; draw(); } draw();
         </script></body></html>'''.replace('ROWS', json.dumps(rows)).replace('FORMS', json.dumps(forms)).replace('LOGOUT_FLOW', json.dumps(logout_flow)).replace('RESULT_FLOW', json.dumps(result_flow))
@@ -88,7 +88,7 @@ class BrowserFlow(unittest.TestCase):
                     'CHOICES_SELECTOR': ('a.button[href="/archway"], button.button[type="submit"]:has-text("Brave Threshing"), button[data-page-next], label[for^="choice-"]' if forms else '.choice'), 'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit][form=choices]', 'DEATH_SELECTOR': '#death',
                     'SIGN_OUT_SELECTOR': '#logout', 'SHADOW_PAUSE_SCOPE': 'account'}
         settings.update(EMAIL_TYPING_DELAY_MS='0', LOGIN_EMAIL_CASE='original', DEATH_CONTINUE_SELECTOR='', ROTUNDA_SELECTOR='', PROFILE_SELECTOR='',
-                        DEATH_NARRATIVE_SELECTOR='', COOLDOWN_SELECTOR='')
+                        DEATH_NARRATIVE_SELECTOR='', COOLDOWN_SELECTOR='#cooldown-label')
         if logout_flow:
             settings.update(DEATH_CONTINUE_SELECTOR='button.onward[data-page-next]',
                             ROTUNDA_SELECTOR='a.icon-button[href="/rotunda"]',
@@ -515,7 +515,7 @@ class BrowserFlow(unittest.TestCase):
             page = context.new_page()
             page.set_default_timeout(1500)
             page.set_content('''<style>@keyframes reveal {from {opacity:0} to {opacity:1}}
-                .revealing {animation:reveal .2s both}</style>
+                .revealing {animation:reveal .6s both}</style>
                 <script>window.selections=0;window.submissions=0;</script>
                 <section id="choice-panel"><form id="choices" onsubmit="event.preventDefault();window.submissions++;document.body.innerHTML='Next scene'">
                 <input hidden type="radio" name="choice" id="choice-0">
@@ -527,13 +527,6 @@ class BrowserFlow(unittest.TestCase):
             page.locator('#choice-0').evaluate("""(input, onSelect) => input.addEventListener('change', () => {
                 window.selections++; if(onSelect) Function(onSelect)();
             })""", on_select)
-            if animated:
-                page.locator('label[for="choice-1"]').evaluate("element => element.classList.add('revealing')")
-            if ancestor_animated:
-                page.locator('#choice-panel').evaluate(
-                    "element => { element.animate([{opacity:.2}, {opacity:1}], {duration:300, fill:'both'}); }")
-            if setup_script:
-                page.evaluate(setup_script)
             with tempfile.TemporaryDirectory() as directory:
                 with patch.dict(os.environ, {'LOGIN_FLOW': 'recorded', 'CHOICES_SELECTOR': selector,
                                             'CHOICE_SUBMIT_SELECTOR': 'button[data-choices-submit]'}), \
@@ -541,6 +534,13 @@ class BrowserFlow(unittest.TestCase):
                      patch('builtins.print') as output:
                     error = None
                     try:
+                        if animated:
+                            page.locator('label[for="choice-1"]').evaluate("element => element.classList.add('revealing')")
+                        if ancestor_animated:
+                            page.locator('#choice-panel').evaluate(
+                                "element => { element.animate([{opacity:.2}, {opacity:1}], {duration:600, fill:'both'}); }")
+                        if setup_script:
+                            page.evaluate(setup_script)
                         _, expected = check_tree_checkpoint(page, state, 'one@gmail.com', 'initial')
                         if after_initial:
                             page.evaluate(after_initial)
