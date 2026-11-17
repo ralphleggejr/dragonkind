@@ -241,11 +241,12 @@ class Decisions(unittest.TestCase):
             context.close.assert_called_once()
             browser.close.assert_called_once()
 
-    def test_all_eight_requested_accounts_are_active_again(self):
+    def test_all_nine_requested_accounts_are_active(self):
         accounts = json.loads(Path('route.json').read_text())['accounts']
         self.assertEqual(accounts, ['ralphleggejr@gmail.com', 'ralphleggejr.apple@gmail.com',
             'leggetechsolutions@gmail.com', 'leggefamilyco@gmail.com', 'rljr.code@gmail.com',
-            'rlegge.code@gmail.com', 'leggejr.co@gmail.com', '10249southlawncir@gmail.com'])
+            'rlegge.code@gmail.com', 'leggejr.co@gmail.com', '10249southlawncir@gmail.com',
+            'ralphlegge.code@gmail.com'])
 
     def test_retry_login_errors_keeps_cooldowns_and_other_pauses(self):
         state = {'accounts': {
@@ -323,7 +324,7 @@ class Decisions(unittest.TestCase):
 
     def test_route_configuration(self):
         route = json.loads(Path('route.json').read_text())
-        self.assertEqual(len(set(route['accounts'])), 8)
+        self.assertEqual(len(set(route['accounts'])), 9)
         self.assertEqual(route['cooldown_seconds'], 14400)
         self.assertEqual(route['steps'][route['shadow_checkpoint']],
                          [{'prefix': 'Climb down slowly to pursue'}])

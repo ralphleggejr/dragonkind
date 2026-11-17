@@ -19,6 +19,7 @@ from .checkpoint_images import (OPTION_BOUNDS_JS, ScreenshotEvidenceError, image
 STATE = Path('data/state.json')
 TREE_REPORT_TO = 'rljr.code@gmail.com'
 MAIL_RETRY_SECONDS = 300
+TREE_OBSERVATION_SECONDS = 120
 REQUIRED = ['MAIL_USER', 'MAIL_PASSWORD', 'EMAIL_SELECTOR', 'EMAIL_SUBMIT_SELECTOR',
             'MFA_SELECTOR', 'AUTH_READY_SELECTOR', 'CHOICES_SELECTOR', 'CHOICE_SUBMIT_SELECTOR', 'DEATH_SELECTOR',
             'SIGN_OUT_SELECTOR', 'MFA_ORIGINAL_SENDER', 'COOLDOWN_SELECTOR']
@@ -297,10 +298,61 @@ def capture_paused_tree_screenshot(page, state, account):
             group.dispose()
 
 
+def observe_tree_options(page, group, state, account, snapshot, inspect):
+    """Watch the live option list for a full two minutes before allowing a choice."""
+    record = state['accounts'][account]
+    observation = {'started_at': datetime.now().astimezone().isoformat(),
+                   'required_seconds': TREE_OBSERVATION_SECONDS, 'elapsed_seconds': 0,
+                   'completed': False}
+    record['tree_checkpoint_observation'] = observation
+    save_state(STATE, state)
+    print(f'Tree checkpoint: observing options for {TREE_OBSERVATION_SECONDS}s before any selection; '
+          'a third option or shadow stops this account immediately.', flush=True)
+    started = time.monotonic()
+    fingerprint = [[option['control'], option['text']] for option in snapshot['options']]
+    result = None
+    try:
+        # Poll live DOM even when the window is in the background. Hidden options count.
+        # The browser clock measures the full interval; a stable pair cannot finish early.
+        result = page.wait_for_function("""({group, selector, fingerprint, started, duration}) => {
+            const inspect = """ + CHOICE_OPTIONS_JS + """;
+            const painted = """ + PAINTED_ELEMENT_JS + """;
+            const snapshot = group ? inspect(group) : (() => {
+                const options = [...document.querySelectorAll(selector)]
+                    .filter(element => element.tagName === 'BUTTON' && painted(element))
+                    .map(element => ({text: element.innerText.trim(), control: null, painted: true, enabled: !element.disabled}));
+                return {options, visible_count: options.length, all_visible: !!options.length,
+                    animations_complete: true, settled: !!options.length};
+            })();
+            const changed = JSON.stringify(snapshot.options.map(option => [option.control, option.text])) !== JSON.stringify(fingerprint);
+            if ((group && !group.isConnected) || changed || snapshot.options.length !== 2 ||
+                snapshot.options.some(option => /shadow/i.test(option.text) || !option.enabled || !option.text) ||
+                performance.now() - started >= duration) return snapshot;
+            return false;
+        }""", arg={'group': group, 'selector': os.environ['CHOICES_SELECTOR'],
+                   'fingerprint': fingerprint, 'started': page.evaluate('performance.now()'),
+                   'duration': TREE_OBSERVATION_SECONDS * 1000},
+            polling=100, timeout=max(page_timeout_ms(), (TREE_OBSERVATION_SECONDS + 1) * 1000))
+        after = result.json_value()
+        inspect(after, 'after observation')
+        if group is not None and not group.evaluate('(element) => element.isConnected'):
+            raise TreeCheckpointReview('Tree checkpoint changed during the observation window')
+        if [[option['control'], option['text']] for option in after['options']] != fingerprint:
+            raise TreeCheckpointReview('Tree checkpoint options changed during the observation window')
+        observation.update(completed=True, completed_at=datetime.now().astimezone().isoformat())
+        return after
+    finally:
+        observation['elapsed_seconds'] = round(time.monotonic() - started, 3)
+        save_state(STATE, state)
+        if result is not None:
+            result.dispose()
+
+
 def check_tree_checkpoint(page, state, account, stage, expected=None):
     record = state['accounts'][account]
     if stage == 'initial':
         record['tree_checkpoint_checks'] = []
+        record.pop('tree_checkpoint_observation', None)
     rows = read_story_controls(page, wait_all_choices=False)
     group = tree_choice_group(page, rows)
 
@@ -329,6 +381,10 @@ def check_tree_checkpoint(page, state, account, stage, expected=None):
     try:
         snapshot = checkpoint_snapshot(page, group)
         fingerprint = inspect(snapshot, stage)
+        if stage == 'initial':
+            snapshot = observe_tree_options(page, group, state, account, snapshot, inspect)
+        elif not record.get('tree_checkpoint_observation', {}).get('completed'):
+            raise TreeCheckpointReview('Tree checkpoint observation window has not completed')
         if group is not None and not snapshot['settled']:
             print('Tree checkpoint: waiting for all options and their reveal animations to finish.', flush=True)
             page.wait_for_function("""(group) => {
@@ -989,6 +1045,7 @@ def play(browser, route, state, account, restart_browser=None):
     try:
         record.update(status='active', step=0)
         record.pop('tree_checkpoint_checks', None)
+        record.pop('tree_checkpoint_observation', None)
         record.pop('tree_checkpoint_screenshot', None)
         record.pop('tree_checkpoint_screenshot_error', None)
         record.pop('login_diagnostic', None)

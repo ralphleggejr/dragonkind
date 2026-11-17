@@ -16,6 +16,8 @@ class BrowserFlow(unittest.TestCase):
     def setUpClass(cls):
         cls.flow_patch = patch.dict(os.environ, {'LOGIN_FLOW': 'custom'})
         cls.flow_patch.start()
+        cls.observation_patch = patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 0)
+        cls.observation_patch.start()
         cls.driver = sync_playwright().start()
         executable = os.environ.get('TEST_CHROMIUM_PATH') or shutil.which('chromium')
         try:
@@ -30,6 +32,7 @@ class BrowserFlow(unittest.TestCase):
         cls.browser.close()
         cls.driver.stop()
         cls.flow_patch.stop()
+        cls.observation_patch.stop()
 
     def exercise(self, shadow=False, mail_failure=False, mismatch=False, auto_submit=False, forms=False, logout_flow=False, shadow_position=2, red_dragon=False, result_flow=False):
         rows = [[options[0]['prefix'] + ' the recorded continuation' if isinstance(options[0], dict)
@@ -437,7 +440,7 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(notifications, [])
         checks = state['accounts'][ROUTE['accounts'][0]]['tree_checkpoint_checks']
         self.assertEqual([check['stage'] for check in checks],
-                         ['initial', 'before selection', 'before selection after screenshot', 'before submission'])
+                         ['initial', 'after observation', 'before selection', 'before selection after screenshot', 'before submission'])
         self.assertTrue(state['accounts'][ROUTE['accounts'][0]]['tree_checkpoint_screenshot']['verified_after_capture'])
         self.assertTrue(all(check['all_visible'] and check['animations_complete'] for check in checks))
 
@@ -556,13 +559,13 @@ class BrowserFlow(unittest.TestCase):
         finally:
             context.close()
 
-    def test_tree_two_options_are_logged_and_checked_three_times(self):
+    def test_tree_two_options_are_logged_at_each_guard_stage(self):
         state, error, selections, submissions, log = self.exercise_tree_safety_checks()
         self.assertIsNone(error)
         self.assertEqual((selections, submissions), (1, 1))
         checks = state['accounts']['one@gmail.com']['tree_checkpoint_checks']
         self.assertEqual([check['stage'] for check in checks],
-                         ['initial', 'before selection', 'before selection after screenshot', 'before submission'])
+                         ['initial', 'after observation', 'before selection', 'before selection after screenshot', 'before submission'])
         self.assertTrue(all(check['option_count'] == 2 and not check['shadow_found'] for check in checks))
         self.assertIn('Climb down slowly to pursue the sound', log)
         self.assertIn('Another choice', log)

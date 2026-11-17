@@ -11,6 +11,8 @@ from .core import StoryPositionError
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
+# Leave room for all nine captures while retaining compatibility with older 2 MiB files.
+MAX_CAPTURE_BYTES = MAX_TOTAL_BYTES // 9
 RETENTION_SECONDS = 7 * 24 * 3600
 PNG_HEADER = b'\x89PNG\r\n\x1a\n'
 
@@ -40,7 +42,7 @@ def image_root(state_path):
 def save_checkpoint_png(state_path, account, data, snapshot, stage):
     if not isinstance(data, bytes) or not data.startswith(PNG_HEADER) or len(data) < 24:
         raise ScreenshotEvidenceError('Checkpoint capture did not produce a PNG image')
-    if len(data) > MAX_IMAGE_BYTES:
+    if len(data) > min(MAX_IMAGE_BYTES, MAX_CAPTURE_BYTES):
         raise ScreenshotEvidenceError('Checkpoint image exceeds the email attachment size limit')
     root = image_root(state_path)
     root.mkdir(parents=True, exist_ok=True)

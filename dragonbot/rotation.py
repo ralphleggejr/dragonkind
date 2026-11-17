@@ -8,7 +8,7 @@ def result_snapshot(state, account, attempted):
     record = state['accounts'].get(account, {})
     return {'finished_at': datetime.now().astimezone().isoformat(), 'attempted': attempted,
             **deepcopy({key: record[key] for key in ('status', 'reason', 'next_run',
-                'retry_at', 'retry_attempts', 'tree_checkpoint_checks', 'notification_details',
+                'retry_at', 'retry_attempts', 'tree_checkpoint_checks', 'tree_checkpoint_observation', 'notification_details',
                 'cooldown_confirmation', 'tree_checkpoint_screenshot',
                 'tree_checkpoint_screenshot_error') if key in record})}
 
@@ -96,6 +96,14 @@ def rotation_summary(state, format_checks, aborted=False):
                 lines.append(f'Automatic retry scheduled; consecutive failures: {result.get("retry_attempts", 0)}')
             if result.get('tree_checkpoint_screenshot_error'):
                 lines.append(f'Checkpoint screenshot failed: {result["tree_checkpoint_screenshot_error"]}')
+            observation = result.get('tree_checkpoint_observation')
+            if observation and result.get('attempted'):
+                lines.extend(['Tree observation completed: ' + ('YES' if observation['completed'] else 'NO'),
+                              f'Observation required: {observation["required_seconds"]} seconds',
+                              f'Observation elapsed: {observation["elapsed_seconds"]} seconds',
+                              f'Observation started: {observation["started_at"]}'])
+                if observation.get('completed_at'):
+                    lines.append(f'Observation finished: {observation["completed_at"]}')
             checks = result.get('tree_checkpoint_checks', [])
             if checks and (result.get('attempted') or result.get('status') == 'paused'):
                 lines.append(format_checks(account, checks, result.get('status', 'pending').upper()))

@@ -7,11 +7,12 @@ import shutil
 import smtplib
 import struct
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright
-from dragonbot.checkpoint_images import (MAX_IMAGE_BYTES, PNG_HEADER, RETENTION_SECONDS,
+from dragonbot.checkpoint_images import (MAX_CAPTURE_BYTES, MAX_IMAGE_BYTES, PNG_HEADER, RETENTION_SECONDS,
     ScreenshotEvidenceError, image_root, prune_checkpoint_images, read_checkpoint_png,
     rotation_screenshots, save_checkpoint_png)
 from dragonbot.__main__ import (capture_paused_tree_screenshot, check_tree_checkpoint,
@@ -86,10 +87,10 @@ class ImageStorage(unittest.TestCase):
 
 
 class EmailScreenshots(unittest.TestCase):
-    def make_round(self, state_path):
+    def make_round(self, state_path, png=PNG):
         state = {'accounts': {}, 'global_pause': False}
         for account in ACCOUNTS:
-            evidence = save_checkpoint_png(state_path, account, PNG, snapshot(), 'before selection')
+            evidence = save_checkpoint_png(state_path, account, png, snapshot(), 'before selection')
             evidence['verified_after_capture'] = True
             state['accounts'][account] = {'status': 'cooldown', 'next_run': 20000,
                                            'tree_checkpoint_screenshot': evidence}
@@ -98,7 +99,7 @@ class EmailScreenshots(unittest.TestCase):
             record_result(state, ACCOUNTS, account)
         return state
 
-    def test_final_email_contains_all_eight_named_png_attachments(self):
+    def test_final_email_contains_all_nine_named_png_attachments(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / 'state.json'
             state = self.make_round(state_path)
@@ -110,12 +111,27 @@ class EmailScreenshots(unittest.TestCase):
                 message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
                 self.assertEqual(message['To'], 'rljr.code@gmail.com')
                 attachments = list(message.iter_attachments())
-                self.assertEqual(len(attachments), 8)
-                self.assertEqual(len({image.get_filename() for image in attachments}), 8)
+                self.assertEqual(len(attachments), len(ACCOUNTS))
+                self.assertEqual(len({image.get_filename() for image in attachments}), len(ACCOUNTS))
                 self.assertTrue(all(image.get_content_type() == 'image/png' for image in attachments))
                 self.assertTrue(all(image.get_payload(decode=True) == PNG for image in attachments))
-                self.assertIn('Checkpoint screenshots: 8 of 8', message.get_body(preferencelist=('plain',)).get_content())
+                self.assertIn('Checkpoint screenshots: 9 of 9', message.get_body(preferencelist=('plain',)).get_content())
                 smtp.return_value.__enter__.return_value.send_message.assert_called_once()
+
+    def test_nine_maximum_size_captures_fit_in_one_gmail_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / 'state.json'
+            png = PNG + bytes(MAX_CAPTURE_BYTES - len(PNG))
+            state = self.make_round(state_path, png=png)
+            with patch('dragonbot.__main__.STATE', state_path), \
+                 patch.dict(os.environ, {'MAIL_USER': 'inbox@example.com', 'MAIL_PASSWORD': 'fixture-only'}), \
+                 patch('dragonbot.mail.smtplib.SMTP') as smtp:
+                finish_rotation_report(state)
+                deliver_tree_reports(state)
+                message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+                self.assertEqual(len(list(message.iter_attachments())), len(ACCOUNTS))
+                self.assertLess(len(message.as_bytes()), 25_000_000)
+                self.assertFalse(state['tree_report_outbox'])
 
     def test_queued_images_survive_restart_and_project_move_before_delivery_retry(self):
         with tempfile.TemporaryDirectory() as original, tempfile.TemporaryDirectory() as moved:
@@ -136,10 +152,10 @@ class EmailScreenshots(unittest.TestCase):
                  patch('dragonbot.mail.smtplib.SMTP') as smtp:
                 deliver_tree_reports(saved)
                 message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
-                self.assertEqual(len(list(message.iter_attachments())), 8)
+                self.assertEqual(len(list(message.iter_attachments())), len(ACCOUNTS))
                 self.assertFalse(load_state(new_state_path)['tree_report_outbox'])
 
-    def test_missing_image_is_reported_as_an_error_with_the_other_seven_attached(self):
+    def test_missing_image_is_reported_as_an_error_with_the_other_eight_attached(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / 'state.json'
             state = self.make_round(state_path)
@@ -152,10 +168,10 @@ class EmailScreenshots(unittest.TestCase):
                 deliver_tree_reports(state)
                 message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
                 self.assertIn('SCREENSHOT ERROR', message['Subject'])
-                self.assertEqual(len(list(message.iter_attachments())), 7)
+                self.assertEqual(len(list(message.iter_attachments())), len(ACCOUNTS) - 1)
                 text = message.get_body(preferencelist=('plain',)).get_content()
                 self.assertIn('these images were not attached', text)
-                self.assertIn('Checkpoint screenshots: 7 of 8', text)
+                self.assertIn('Checkpoint screenshots: 8 of 9', text)
                 self.assertIn(ACCOUNTS[0], text)
 
 
@@ -196,8 +212,11 @@ class ScreenshotTiming(unittest.TestCase):
         self.settings.start()
         self.path_patch = patch('dragonbot.__main__.STATE', self.state_path)
         self.path_patch.start()
+        self.observation_patch = patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 0)
+        self.observation_patch.start()
 
     def tearDown(self):
+        self.observation_patch.stop()
         self.path_patch.stop()
         self.settings.stop()
         self.context.close()
@@ -205,6 +224,60 @@ class ScreenshotTiming(unittest.TestCase):
 
     def prepare(self):
         return check_tree_checkpoint(self.page, self.state, 'a', 'initial')[1]
+
+    def test_full_observation_precedes_screenshot_selection_and_submission(self):
+        with patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 0.45):
+            started = time.monotonic()
+            expected = self.prepare()
+            self.assertGreaterEqual(time.monotonic() - started, 0.45)
+            self.assertNotIn('tree_checkpoint_screenshot', self.state['accounts']['a'])
+            original = self.page.screenshot
+            def photograph(**kwargs):
+                observation = self.state['accounts']['a']['tree_checkpoint_observation']
+                self.assertTrue(observation['completed'])
+                self.assertGreaterEqual(observation['elapsed_seconds'], 0.45)
+                self.assertEqual(self.page.evaluate('[window.selections,window.submissions]'), [0, 0])
+                return original(**kwargs)
+            with patch.object(self.page, 'screenshot', side_effect=photograph):
+                execute_choice(self.page, self.page.locator('label[for="choice-0"]'),
+                    before_action=lambda stage: check_tree_checkpoint(self.page, self.state, 'a', stage, expected))
+        self.assertEqual(self.page.evaluate('[window.selections,window.submissions]'), [1, 1])
+
+    def test_late_hidden_third_option_interrupts_observation_without_choosing(self):
+        self.page.evaluate('''() => setTimeout(() => document.querySelector('#choices').insertAdjacentHTML('beforeend',
+            '<input hidden type=radio name=choice id=choice-2><label hidden for=choice-2>Follow a mysterious trail</label>'), 250)''')
+        with patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 2):
+            with self.assertRaisesRegex(TreeCheckpointReview, '3 options'):
+                self.prepare()
+        observation = self.state['accounts']['a']['tree_checkpoint_observation']
+        self.assertFalse(observation['completed'])
+        self.assertLess(observation['elapsed_seconds'], 2)
+        self.assertEqual(self.state['accounts']['a']['tree_checkpoint_checks'][-1]['visible_count'], 2)
+        self.assertEqual(self.page.evaluate('[window.selections,window.submissions]'), [0, 0])
+        self.assertNotIn('tree_checkpoint_screenshot', self.state['accounts']['a'])
+
+    def test_shadow_in_existing_label_interrupts_observation_even_with_two_options(self):
+        self.page.evaluate('''() => setTimeout(() => document.querySelector('label[for="choice-1"]').textContent='Follow the SHADOW', 250)''')
+        with patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 2):
+            with self.assertRaisesRegex(TreeCheckpointReview, 'shadow'):
+                self.prepare()
+        self.assertFalse(self.state['accounts']['a']['tree_checkpoint_observation']['completed'])
+        self.assertEqual(self.state['accounts']['a']['tree_checkpoint_checks'][-1]['option_count'], 2)
+        self.assertEqual(self.page.evaluate('[window.selections,window.submissions]'), [0, 0])
+
+    def test_restart_repeats_window_instead_of_reusing_saved_completion(self):
+        self.state['accounts']['a']['tree_checkpoint_observation'] = {
+            'completed': True, 'elapsed_seconds': 120, 'completed_at': 'old attempt'}
+        with patch('dragonbot.__main__.TREE_OBSERVATION_SECONDS', 0.35):
+            self.prepare()
+        observation = self.state['accounts']['a']['tree_checkpoint_observation']
+        self.assertGreaterEqual(observation['elapsed_seconds'], 0.35)
+        self.assertNotEqual(observation['completed_at'], 'old attempt')
+
+    def test_selection_cannot_bypass_initial_observation(self):
+        with self.assertRaisesRegex(TreeCheckpointReview, 'observation window has not completed'):
+            check_tree_checkpoint(self.page, self.state, 'a', 'before selection')
+        self.assertEqual(self.page.evaluate('[window.selections,window.submissions]'), [0, 0])
 
     def test_real_options_png_is_captured_before_any_radio_is_changed(self):
         expected = self.prepare()

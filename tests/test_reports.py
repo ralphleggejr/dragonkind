@@ -32,7 +32,7 @@ class RotationEmails(unittest.TestCase):
             record_result(state, ACCOUNTS, account)
         finish_rotation_report(state)
 
-    def test_one_summary_after_all_eight_accounts_with_all_checks_and_timers(self):
+    def test_one_summary_after_all_nine_accounts_with_all_checks_and_timers(self):
         state = self.state()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'state.json'
@@ -49,12 +49,12 @@ class RotationEmails(unittest.TestCase):
                 mail.assert_called_once()
                 self.assertEqual(mail.call_args.kwargs['recipient'], TREE_REPORT_TO)
                 subject, body = mail.call_args.args
-                self.assertIn('COMPLETE: 8/8', subject)
+                self.assertIn('COMPLETE: 9/9', subject)
                 for account in ACCOUNTS:
                     self.assertIn(account, body)
                 for text in ('Options found: 2', 'Shadow found: NO', 'All options visible: YES', 'Animations complete: YES'):
-                    self.assertEqual(body.count(text), 24)
-                self.assertEqual(body.count('Next eligible:'), 8)
+                    self.assertEqual(body.count(text), 3 * len(ACCOUNTS))
+                self.assertEqual(body.count('Next eligible:'), len(ACCOUNTS))
                 saved = load_state(path)
                 self.assertFalse(saved['tree_report_outbox'])
                 self.assertEqual(saved['last_rotation_report']['status'], 'sent')
@@ -70,7 +70,7 @@ class RotationEmails(unittest.TestCase):
         driver.__exit__.side_effect = lambda *args: events.append('driver-closed')
         def play(engine, route, saved, account, headless):
             summaries = [call for call in mail.call_args_list if 'Dragonkind rotation' in call.args[0]]
-            self.assertEqual(len(summaries), len(played) // 8)
+            self.assertEqual(len(summaries), len(played) // len(ACCOUNTS))
             played.append((account, now[0]))
             if failure:
                 alert(saved, account, 'Manual global stop', immediate=False)
@@ -134,12 +134,34 @@ class RotationEmails(unittest.TestCase):
                 self.assertIn('Confirmation source: site_countdown', body)
                 self.assertIn('Death screen observed: NO', body)
 
+    def test_summary_preserves_observation_proof_for_each_account_after_restart(self):
+        state = self.state()
+        for record in state['accounts'].values():
+            record['tree_checkpoint_observation'] = {'required_seconds': 120, 'elapsed_seconds': 120.2,
+                'completed': True, 'started_at': '2026-11-17T10:00:00-07:00',
+                'completed_at': '2026-11-17T10:02:00.200000-07:00'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            with patch('dragonbot.__main__.STATE', path), patch('dragonbot.__main__.notify') as mail:
+                begin_rotation(state, ACCOUNTS)
+                for account in ACCOUNTS:
+                    record_result(state, ACCOUNTS, account)
+                path.write_text(json.dumps(state))
+                saved = load_state(path)
+                state['accounts'][ACCOUNTS[0]]['tree_checkpoint_observation']['completed'] = False
+                finish_rotation_report(saved)
+                deliver_tree_reports(saved)
+                body = mail.call_args.args[1]
+                for line in ('Tree observation completed: YES', 'Observation required: 120 seconds',
+                             'Observation elapsed: 120.2 seconds'):
+                    self.assertEqual(body.count(line), len(ACCOUNTS))
+
     def test_shadow_emails_immediately_then_one_summary_after_remaining_accounts(self):
         saved, mail, played = self.simulate(shadow=True)
         self.assertEqual([account for account, _ in played], ACCOUNTS)
         self.assertEqual(mail.call_count, 2)
         self.assertIn('paused', mail.call_args_list[0].args[0])
-        self.assertIn('COMPLETE: 8/8', mail.call_args_list[1].args[0])
+        self.assertIn('COMPLETE: 9/9', mail.call_args_list[1].args[0])
         self.assertIn('Follow the shadow', mail.call_args_list[1].args[1])
         self.assertFalse(saved['global_pause'])
 
@@ -147,20 +169,20 @@ class RotationEmails(unittest.TestCase):
         saved, mail, played = self.simulate(staggered=True, rounds=2)
         self.assertEqual(mail.call_count, 2)
         self.assertEqual([account for account, _ in played], ACCOUNTS * 2)
-        self.assertEqual([start for _, start in played[8:]], [start + 14400 for _, start in played[:8]])
+        self.assertEqual([start for _, start in played[len(ACCOUNTS):]], [start + 14400 for _, start in played[:len(ACCOUNTS)]])
 
     def test_explicitly_deferred_pauses_produce_one_summary_not_two(self):
         saved, mail, played = self.simulate(staggered=True, all_paused=True)
         self.assertEqual(mail.call_count, 1)
-        self.assertEqual(len(played), 8)
+        self.assertEqual(len(played), len(ACCOUNTS))
         self.assertTrue(all(record['status'] == 'paused' for record in saved['accounts'].values()))
 
     def test_manual_global_stop_ends_round_with_one_partial_summary(self):
         saved, mail, played = self.simulate(failure=True)
         self.assertEqual(len(played), 1)
         self.assertEqual(mail.call_count, 1)
-        self.assertIn('STOPPED EARLY: 1/8', mail.call_args.args[0])
-        self.assertEqual(mail.call_args.args[1].count('NOT ATTEMPTED:'), 7)
+        self.assertIn('STOPPED EARLY: 1/9', mail.call_args.args[0])
+        self.assertEqual(mail.call_args.args[1].count('NOT ATTEMPTED:'), len(ACCOUNTS) - 1)
         self.assertTrue(saved['global_pause'])
 
     def test_partial_round_survives_restart_and_check_snapshots_are_preserved(self):
@@ -182,7 +204,7 @@ class RotationEmails(unittest.TestCase):
                 finish_rotation_report(saved)
                 deliver_tree_reports(saved)
                 self.assertEqual(mail.call_count, 1)
-                self.assertEqual(mail.call_args.args[1].count('Options found: 2'), 24)
+                self.assertEqual(mail.call_args.args[1].count('Options found: 2'), 3 * len(ACCOUNTS))
 
     def test_unusual_option_error_alert_is_immediate_and_in_summary(self):
         state = self.state()
