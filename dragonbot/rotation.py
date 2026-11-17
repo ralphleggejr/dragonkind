@@ -9,7 +9,8 @@ def result_snapshot(state, account, attempted):
     return {'finished_at': datetime.now().astimezone().isoformat(), 'attempted': attempted,
             **deepcopy({key: record[key] for key in ('status', 'reason', 'next_run',
                 'retry_at', 'retry_attempts', 'tree_checkpoint_checks', 'notification_details',
-                'cooldown_confirmation') if key in record})}
+                'cooldown_confirmation', 'tree_checkpoint_screenshot',
+                'tree_checkpoint_screenshot_error') if key in record})}
 
 
 def begin_rotation(state, accounts):
@@ -93,6 +94,8 @@ def rotation_summary(state, format_checks, aborted=False):
                 lines.append('Site cooldown confirmed: not recorded for this attempt')
             if result.get('status') == 'retry_wait':
                 lines.append(f'Automatic retry scheduled; consecutive failures: {result.get("retry_attempts", 0)}')
+            if result.get('tree_checkpoint_screenshot_error'):
+                lines.append(f'Checkpoint screenshot failed: {result["tree_checkpoint_screenshot_error"]}')
             checks = result.get('tree_checkpoint_checks', [])
             if checks and (result.get('attempted') or result.get('status') == 'paused'):
                 lines.append(format_checks(account, checks, result.get('status', 'pending').upper()))

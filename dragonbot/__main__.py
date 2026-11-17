@@ -13,6 +13,8 @@ from .runtime import AlreadyRunningError, account_deadline, next_attempt, state_
 from .rotation import begin_rotation, record_result, recover_finished_result, rotation_ready, rotation_summary
 from .retries import clear_retry_after_success, protected_pause, retryable_failure, schedule_retry
 from .cooldowns import CooldownEvidenceError, cooldown_evidence
+from .checkpoint_images import (OPTION_BOUNDS_JS, ScreenshotEvidenceError, image_root,
+    save_checkpoint_png, read_checkpoint_png, rotation_screenshots, prune_checkpoint_images)
 
 STATE = Path('data/state.json')
 TREE_REPORT_TO = 'rljr.code@gmail.com'
@@ -199,8 +201,10 @@ CHOICE_OPTIONS_JS = """(group) => {
         (animation.pending || !['finished', 'idle'].includes(animation.playState)));
     const visibleCount = options.filter(option => option.painted).length;
     const allVisible = options.length > 0 && visibleCount === options.length;
+    const bounds = """ + OPTION_BOUNDS_JS + """;
     return {options, visible_count: visibleCount, all_visible: allVisible,
-        animations_complete: !animating, settled: group.isConnected && allVisible && !animating};
+        animations_complete: !animating, settled: group.isConnected && allVisible && !animating,
+        capture_rect: bounds(labels)};
 }"""
 
 
@@ -229,6 +233,68 @@ def tree_choice_group(page, rows):
         return None
     return story_controls(page).nth(label['index']).evaluate_handle(
         "(element) => element.control?.form || element.closest('form') || element.parentElement")
+
+
+def checkpoint_snapshot(page, group):
+    if group is not None:
+        return group.evaluate(CHOICE_OPTIONS_JS)
+    rows = read_story_controls(page, wait_all_choices=False)
+    options = [{'text': row['text'], 'control': None, 'painted': True, 'enabled': True}
+               for row in rows if row['tag'] == 'BUTTON']
+    rect = story_controls(page).evaluate_all("""(elements) => {
+        const bounds = """ + OPTION_BOUNDS_JS + """;
+        return bounds(elements.filter(element => element.tagName === 'BUTTON'));
+    }""")
+    return {'options': options, 'settled': bool(options), 'visible_count': len(options),
+            'all_visible': bool(options), 'animations_complete': True, 'capture_rect': rect}
+
+
+def capture_tree_screenshot(page, group, state, account, stage):
+    try:
+        page.wait_for_function('() => !document.fonts || document.fonts.status === "loaded"')
+        snapshot = checkpoint_snapshot(page, group)
+        rect = snapshot['capture_rect']
+        if not rect or rect['width'] <= 0 or rect['height'] <= 0:
+            raise ScreenshotEvidenceError('Checkpoint options have no screenshot area')
+        data = page.screenshot(type='png', clip=rect, full_page=True, animations='allow',
+                               caret='hide', scale='css')
+        evidence = save_checkpoint_png(STATE, account, data, snapshot, stage)
+    except ScreenshotEvidenceError:
+        raise
+    except Exception as error:
+        raise ScreenshotEvidenceError(f'Checkpoint screenshot capture failed ({type(error).__name__})') from None
+    evidence['capture_rect'] = rect
+    record = state['accounts'][account]
+    record['tree_checkpoint_screenshot'] = evidence
+    record.pop('tree_checkpoint_screenshot_error', None)
+    save_state(STATE, state)
+    return evidence
+
+
+def capture_paused_tree_screenshot(page, state, account):
+    group = None
+    try:
+        rows = read_story_controls(page, wait_all_choices=False)
+        group = tree_choice_group(page, rows)
+        if group is not None:
+            try:
+                page.wait_for_function("""(group) => {
+                    const inspect = """ + CHOICE_OPTIONS_JS + """;
+                    return !group.isConnected || inspect(group).settled;
+                }""", arg=group)
+            except Exception:
+                pass  # Capture the real, unfinished reveal as such; never force it to finish.
+        evidence = capture_tree_screenshot(page, group, state, account, 'paused checkpoint')
+        after = checkpoint_snapshot(page, group)
+        evidence['verified_after_capture'] = (bool(after['settled']) and
+            [[option['control'], option['text']] for option in after['options']] == evidence['option_fingerprint'])
+        save_state(STATE, state)
+    except Exception as error:
+        state['accounts'][account]['tree_checkpoint_screenshot_error'] = type(error).__name__
+        save_state(STATE, state)
+    finally:
+        if group is not None:
+            group.dispose()
 
 
 def check_tree_checkpoint(page, state, account, stage, expected=None):
@@ -261,15 +327,7 @@ def check_tree_checkpoint(page, state, account, stage, expected=None):
         return fingerprint
 
     try:
-        if group is None:
-            # Custom routes may expose option buttons instead of radio labels.
-            snapshot = {'options': [{'text': row['text'], 'control': None,
-                                    'painted': True, 'enabled': True}
-                                   for row in rows if row['tag'] == 'BUTTON'], 'settled': True}
-            snapshot.update(visible_count=len(snapshot['options']),
-                            all_visible=bool(snapshot['options']), animations_complete=True)
-        else:
-            snapshot = group.evaluate(CHOICE_OPTIONS_JS)
+        snapshot = checkpoint_snapshot(page, group)
         fingerprint = inspect(snapshot, stage)
         if group is not None and not snapshot['settled']:
             print('Tree checkpoint: waiting for all options and their reveal animations to finish.', flush=True)
@@ -285,6 +343,19 @@ def check_tree_checkpoint(page, state, account, stage, expected=None):
             fingerprint = inspect(snapshot, stage + ' after reveal')
         if not snapshot['settled']:
             raise TreeCheckpointReview('Tree checkpoint options did not finish revealing')
+        if stage == 'before selection':
+            evidence = capture_tree_screenshot(page, group, state, account, stage)
+            after = checkpoint_snapshot(page, group)
+            after_fingerprint = inspect(after, stage + ' after screenshot')
+            if after_fingerprint != fingerprint or not after['settled']:
+                raise TreeCheckpointReview('Tree checkpoint changed while its screenshot was captured')
+            rect = after['capture_rect']
+            original = evidence['capture_rect']
+            if (rect is None or any(abs(rect[key] - original[key]) > 1
+                                    for key in ('x', 'y', 'width', 'height'))):
+                raise ScreenshotEvidenceError('Checkpoint layout changed while its screenshot was captured')
+            evidence['verified_after_capture'] = True
+            save_state(STATE, state)
         return read_story_controls(page, wait_all_choices=False), fingerprint
     finally:
         if group is not None:
@@ -317,8 +388,19 @@ def finish_rotation_report(state, aborted=False):
     if rotation is None or not (aborted or rotation_ready(state)):
         return
     subject, body = rotation_summary(state, tree_report_details, aborted)
+    attachments, missing = rotation_screenshots(rotation)
+    body += (f'\n\nCheckpoint screenshots: {len(attachments)} of {len(rotation["accounts"])} accounts.\n'
+             'Images were captured from the options panel; normal evidence is taken after reveal, before selection.\n')
+    for image in attachments:
+        body += (f'\n{image["account"]}: {image["name"]}\nCaptured: {image["captured_at"]}\n'
+                 f'Visible options: {image["visible_count"]} of {image["option_count"]}; '
+                 f'rechecked after capture: {"YES" if image.get("verified_after_capture") else "NO"}\n')
+    if missing:
+        body += '\nNo screenshot from this round (skipped, not reached, or capture failed):\n' + '\n'.join(missing)
     report = {'id': rotation['id'], 'kind': 'rotation', 'recipient': TREE_REPORT_TO,
-              'subject': subject, 'body': body, 'next_attempt': 0, 'attempts': 0}
+              'subject': subject, 'body': body, 'attachments': attachments,
+              'screenshot_accounts': len(rotation['accounts']),
+              'next_attempt': 0, 'attempts': 0}
     state.setdefault('tree_report_outbox', []).append(report)
     state['last_rotation_report'] = {'id': report['id'], 'status': 'pending'}
     for account in rotation['accounts']:
@@ -342,7 +424,26 @@ def deliver_tree_reports(state):
         if report.get('next_attempt', 0) > time.time():
             continue
         try:
-            notify(report['subject'], report['body'], recipient=report['recipient'])
+            attachments, unavailable = [], []
+            for image in report.get('attachments', []):
+                try:
+                    read_checkpoint_png(image, image_root(STATE))
+                    attachments.append(image)
+                except ScreenshotEvidenceError as error:
+                    unavailable.append(f'{image["account"]}: {error}')
+            subject, body = report['subject'], report['body']
+            if unavailable:
+                subject = 'SCREENSHOT ERROR - ' + subject
+                total = report.get('screenshot_accounts', len(report.get('attachments', [])))
+                body = body.replace(
+                    f'Checkpoint screenshots: {len(report.get("attachments", []))} of {total} accounts.',
+                    f'Checkpoint screenshots: {len(attachments)} of {total} accounts.')
+                body += '\n\nScreenshot attachment errors (these images were not attached):\n' + '\n'.join(unavailable)
+            if attachments:
+                notify(subject, body, recipient=report['recipient'], attachments=attachments,
+                       attachment_root=image_root(STATE))
+            else:
+                notify(subject, body, recipient=report['recipient'])
         except Exception:
             report['attempts'] += 1
             report['next_attempt'] = time.time() + MAIL_RETRY_SECONDS
@@ -354,6 +455,7 @@ def deliver_tree_reports(state):
                 record.update(status='sent', sent_at=datetime.now().astimezone().isoformat())
             print(f'Rotation summary sent to {report["recipient"]}.', flush=True)
         save_state(STATE, state)
+        prune_checkpoint_images(state, image_root(STATE))
 
 
 def retry_pending_notifications(state, accounts):
@@ -800,10 +902,11 @@ def queue_account_notification(state, account, subject, body):
     deliver_account_notification(state, account)
 
 
-def save_failure_screenshot(page, account):
+def save_failure_screenshot(page, account, preserve_animations=False):
     if page is not None:
         try:
-            page.screenshot(path=f'data/{account}-paused.png', full_page=True, animations='disabled')
+            page.screenshot(path=f'data/{account}-paused.png', full_page=True,
+                            animations='allow' if preserve_animations else 'disabled')
         except Exception:
             pass
 
@@ -832,7 +935,8 @@ def handle_account_failure(state, account, reason, page=None, details=None, conf
         save_state(STATE, state)
 
 
-def alert(state, account, reason, page=None, global_pause=True, details=None, recipient=None, immediate=None):
+def alert(state, account, reason, page=None, global_pause=True, details=None, recipient=None, immediate=None,
+          preserve_animations=False):
     record = state['accounts'].setdefault(account, {})
     if immediate is None:
         immediate = True
@@ -850,7 +954,7 @@ def alert(state, account, reason, page=None, global_pause=True, details=None, re
     state['global_pause'] = state['global_pause'] or global_pause
     save_state(STATE, state)  # Persist the pause even if screenshot or mail fails.
     print(f'Paused {account}: {reason}. Scope: {record["pause_scope"]}.', flush=True)
-    save_failure_screenshot(page, account)
+    save_failure_screenshot(page, account, preserve_animations=preserve_animations)
     if not immediate:
         print('Pause details will be included in the end-of-rotation summary.', flush=True)
         return
@@ -885,6 +989,8 @@ def play(browser, route, state, account, restart_browser=None):
     try:
         record.update(status='active', step=0)
         record.pop('tree_checkpoint_checks', None)
+        record.pop('tree_checkpoint_screenshot', None)
+        record.pop('tree_checkpoint_screenshot_error', None)
         record.pop('login_diagnostic', None)
         record.pop('story_diagnostic', None)
         save_state(STATE, state)
@@ -974,10 +1080,11 @@ def play(browser, route, state, account, restart_browser=None):
     except TreeCheckpointReview as error:
         checks = record.get('tree_checkpoint_checks', [])
         details = tree_report_details(account, checks, f'PAUSED: {error}')
-        alert(state, account, str(error), page,
+        alert(state, account, str(error), None,
               global_pause=os.environ.get('SHADOW_PAUSE_SCOPE', 'account') == 'global',
               details=details, recipient=TREE_REPORT_TO,
-              immediate=True)
+              immediate=True, preserve_animations=True)
+        capture_paused_tree_screenshot(page, state, account)
     except Exception as error:
         if not story_started:
             record['login_diagnostic'] = login_page_status(page)

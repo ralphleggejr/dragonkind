@@ -82,6 +82,16 @@ The observed panel, confirmation time, deadline source, observed deadline, and e
 
 The rotation email now includes **Site cooldown confirmed**, **Confirmed at**, **Confirmation source**, **Observed deadline**, and **Death screen observed**. Those are distinct facts: a cooldown panel alone is not claimed as a verified death screen. The exact-two-option, all-visible, and shadow guards remain active.
 
+### Eight checkpoint screenshots in the final email
+
+Every account that reaches the post-tree choice must produce a real PNG of the complete options area **after all current options and their reveal animations finish, before the bot selects a radio**. The capture includes all associated labels, with a small margin, rather than the login screen or general account page. Screenshots use the page's actual animation state; animations are never fast-forwarded for checkpoint evidence. The bot reads the option list again after capture and again before Next Scene. If options change or capture fails, it does not proceed past that check.
+
+The single end-of-rotation email to `rljr.code@gmail.com` attaches one named PNG per account, normally **eight images for eight completed accounts**. Its image manifest includes account, capture time, visible/total option count, and whether the DOM was verified again after capture. A shadow alert is still sent immediately. The paused account then waits for its options to reveal naturally for its final-summary image, within the normal browser timeout. A never-revealed option remains marked hidden/unfinished; the image is not represented as a successful two-option check.
+
+Skipped accounts, failures before the checkpoint, and screenshot errors are listed explicitly with an `N of 8` image count. Older-round pictures are not substituted. If an account retries within the same rotation, the latest available checkpoint image from that rotation is used. A lost or corrupted file generates a screenshot-error summary with the other images attached; it is not silently presented as eight successful captures.
+
+Images are stored privately under `data/checkpoint-screenshots/`, outside Git, with portable filenames and integrity hashes recorded in the saved state. Queued email attachments survive restarts and transfers with the `data/` folder. Unreferenced images older than seven days are removed; current account evidence, an active rotation, and pending emails keep their images pinned. Cropped PNG size limits keep the eight-image message within Gmail's attachment limit. SMTP failures retry the same saved images automatically. No extra routine per-account emails are introduced.
+
 ### Black-dragon route research
 
 The [research notes](docs/black-dragon-research.md) list the sources read and the cloud's remaining Reddit access restriction. The accessible unofficial guides did not supply a usable verified alternate sequence or reliable black-dragon odds. All eight accounts therefore keep their existing route; no four-account split was invented. A traceable alternate sequence can be added for four accounts once it is available and its option labels are verified.
@@ -260,7 +270,7 @@ Stop the service on the old computer with `docker compose down`. Copy the projec
 
 ## Review a pause
 
-Read `data/state.json`, the notification, and the account's `data/*-paused.png`. Paused screenshots finish CSS animations so a rejection message is not captured as an empty frame. Screenshots can contain account or story details; keep this folder private. Email updates contain the account, reason, and route step, but no screenshot or login code.
+Read the notification and, if needed, `data/state.json` and local screenshots. General error screenshots may finish CSS animations for diagnostics; post-tree checkpoint evidence preserves the actual reveal state. The final email attaches only the cropped checkpoint PNGs, with their option-count and timing checks. Login/debug screenshots remain local and verification codes are not included in notification text. Screenshots contain story details; keep `data/` private.
 
 Known resumed story choices are identified from the visible page with `--resume-stories`. Shadow pauses still require your review; clear a selected account's pause only after handling the event and confirming that the site can re-enter its recorded route. Stop the service with `docker compose down`, then explicitly clear the selected account's pause:
 

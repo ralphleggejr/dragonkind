@@ -415,7 +415,7 @@ class BrowserFlow(unittest.TestCase):
                  patch('dragonbot.__main__.STATE', Path(directory) / 'state.json'), \
                  patch('dragonbot.__main__.inbox'), patch('dragonbot.__main__.highwater', return_value=10), \
                  patch('dragonbot.__main__.wait_code', return_value='ABC123'), \
-                 patch('dragonbot.__main__.notify') as notify, patch('playwright.sync_api.Page.screenshot'):
+                 patch('dragonbot.__main__.notify') as notify, patch('dragonbot.__main__.save_failure_screenshot'):
                 play(wrapped, ROUTE, state, account)
                 saved = json.loads((Path(directory) / 'state.json').read_text())
                 if notification_bodies is not None:
@@ -437,7 +437,8 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual(notifications, [])
         checks = state['accounts'][ROUTE['accounts'][0]]['tree_checkpoint_checks']
         self.assertEqual([check['stage'] for check in checks],
-                         ['initial', 'before selection', 'before submission'])
+                         ['initial', 'before selection', 'before selection after screenshot', 'before submission'])
+        self.assertTrue(state['accounts'][ROUTE['accounts'][0]]['tree_checkpoint_screenshot']['verified_after_capture'])
         self.assertTrue(all(check['all_visible'] and check['animations_complete'] for check in checks))
 
     def test_continue_your_story_recording_accepts_three_ending_pages(self):
@@ -561,7 +562,7 @@ class BrowserFlow(unittest.TestCase):
         self.assertEqual((selections, submissions), (1, 1))
         checks = state['accounts']['one@gmail.com']['tree_checkpoint_checks']
         self.assertEqual([check['stage'] for check in checks],
-                         ['initial', 'before selection', 'before submission'])
+                         ['initial', 'before selection', 'before selection after screenshot', 'before submission'])
         self.assertTrue(all(check['option_count'] == 2 and not check['shadow_found'] for check in checks))
         self.assertIn('Climb down slowly to pursue the sound', log)
         self.assertIn('Another choice', log)

@@ -8,6 +8,8 @@ from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from .core import DEFAULT_CODE_REGEX, extract_code
+from .checkpoint_images import MAX_TOTAL_BYTES, ScreenshotEvidenceError, read_checkpoint_png
+from pathlib import Path
 
 
 class InboxConnection:
@@ -115,12 +117,20 @@ def wait_code(client, after, account):
     raise RuntimeError('Timed out waiting for a matching forwarded verification email')
 
 
-def notify(subject, body, recipient=None):
+def notify(subject, body, recipient=None, attachments=None, attachment_root=None):
     message = EmailMessage()
     message['From'] = os.environ['MAIL_USER']
     message['To'] = recipient or os.environ.get('NOTIFY_TO', 'rljr.code@gmail.com')
     message['Subject'] = subject
     message.set_content(body)
+    total = 0
+    root = Path(attachment_root) if attachment_root is not None else Path('data/checkpoint-screenshots')
+    for attachment in attachments or []:
+        data = read_checkpoint_png(attachment, root)
+        total += len(data)
+        if total > MAX_TOTAL_BYTES:
+            raise ScreenshotEvidenceError('Checkpoint images exceed the total email attachment size limit')
+        message.add_attachment(data, maintype='image', subtype='png', filename=attachment['name'])
     with smtplib.SMTP(os.environ.get('SMTP_HOST', 'smtp.gmail.com'), 587, timeout=30) as server:
         server.starttls(context=ssl.create_default_context())
         server.login(os.environ['MAIL_USER'], os.environ['MAIL_PASSWORD'])
